@@ -50,6 +50,25 @@ class IntelligenceDB:
         """
         return []
 
+    async def ingest_pipeline_results(
+        self,
+        *,
+        pr_id: str,
+        repo: str,
+        static_findings: list[dict[str, object]],
+        ai_findings: list[object],
+        verdict: dict[str, object],
+    ) -> None:
+        """Store pipeline results for future pattern learning."""
+
+    async def get_contributor_acceptance_rate(self, repo: str, author: str) -> float | None:
+        """Return the historical acceptance rate for a contributor.
+
+        Returns ``None`` when the DB has insufficient data (new contributor
+        or DB not yet populated).  Full implementation belongs to doc 12.
+        """
+        return None
+
     async def close(self) -> None:
         """Release database resources."""
         self._initialized = False

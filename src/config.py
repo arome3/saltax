@@ -61,6 +61,7 @@ class PipelineConfig(BaseModel):
     ai_analyzer_semaphore_timeout: int = Field(default=30, gt=0)
     test_executor_timeout: int = Field(default=300, gt=0)
     test_executor_memory_mb: int = Field(default=512, gt=0)
+    history_weight: float = Field(default=0.0, ge=0.0, le=0.30)
 
     @model_validator(mode="before")
     @classmethod
@@ -94,10 +95,12 @@ class PipelineConfig(BaseModel):
         if "memory_limit_mb" in tests:
             data.setdefault("test_executor_memory_mb", tests["memory_limit_mb"])
 
-        # decision_engine → weights
+        # decision_engine → weights, history_weight
         engine = stages.get("decision_engine") or {}
         if "weights" in engine:
             data.setdefault("weights", engine["weights"])
+        if "history_weight" in engine:
+            data.setdefault("history_weight", engine["history_weight"])
 
         return data
 
