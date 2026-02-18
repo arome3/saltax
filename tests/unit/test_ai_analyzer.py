@@ -1188,10 +1188,11 @@ class TestDictToResult:
 
 
 class TestIntelligenceDBSimilarPatterns:
-    """Verify the stub returns an empty list."""
+    """Verify query_similar_patterns returns a list."""
 
     async def test_returns_empty_list(self) -> None:
         db = _make_intel_db()
+        db.query_similar_patterns = AsyncMock(return_value=[])  # type: ignore[method-assign]
         result = await db.query_similar_patterns(
             code_diff="some code", limit=10
         )

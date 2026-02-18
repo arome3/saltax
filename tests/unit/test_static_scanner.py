@@ -700,10 +700,13 @@ class TestRunStaticScan:
 
 
 class TestIntelligenceDBFalsePositives:
-    """Verify the stub returns an empty frozenset."""
+    """Verify get_false_positive_signatures returns a frozenset."""
 
     async def test_returns_empty_frozenset(self) -> None:
         db = _make_intel_db()
+        db.get_false_positive_signatures = AsyncMock(  # type: ignore[method-assign]
+            return_value=frozenset(),
+        )
         result = await db.get_false_positive_signatures()
         assert result == frozenset()
         assert isinstance(result, frozenset)

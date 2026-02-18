@@ -194,8 +194,8 @@ class TestComputeSSecurity:
 class TestComputeSTests:
     """Unit tests for test score computation."""
 
-    def test_none_returns_zero(self) -> None:
-        assert _compute_s_tests(None) == 0.0
+    def test_none_returns_degraded_neutral(self) -> None:
+        assert _compute_s_tests(None) == 0.5
 
     def test_passed(self) -> None:
         assert _compute_s_tests(_make_test_results(passed=True)) == 1.0
@@ -519,7 +519,7 @@ class TestDegradedAI:
 
 
 class TestMissingTestResults:
-    """test_results=None → s_tests=0."""
+    """test_results=None → s_tests=0.5 (degraded neutral)."""
 
     async def test_none_test_results(self) -> None:
         state = _make_state(
@@ -539,7 +539,7 @@ class TestMissingTestResults:
             await run_decision(state, config, intel_db)
 
         assert state.verdict is not None
-        assert state.verdict["score_breakdown"]["tests_pass"] == 0.0
+        assert state.verdict["score_breakdown"]["tests_pass"] == 0.5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

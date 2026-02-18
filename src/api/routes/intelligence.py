@@ -23,13 +23,4 @@ async def intelligence_stats(
     CRITICAL: never expose raw patterns or vulnerability details.
     Only aggregate counts and distributions are returned.
     """
-    pattern_count = await intel_db.count_patterns()
-
-    return {
-        "total_patterns": pattern_count,
-        "category_distribution": {},
-        "severity_distribution": {},
-        "avg_false_positive_rate": 0.0,
-        "patterns_last_7_days": 0,
-        "top_contributing_repos": [],
-    }
+    return await intel_db.get_stats()

@@ -191,9 +191,14 @@ def _compute_s_security(ai_analysis: dict[str, object] | None) -> float:
 
 
 def _compute_s_tests(test_results: dict[str, object] | None) -> float:
-    """Compute test score: 1.0 if passed, 0.0 otherwise."""
+    """Compute test score: 1.0 if passed, 0.0 if failed, 0.5 if unavailable.
+
+    Returns ``_DEGRADED_NEUTRAL`` when test results are absent (test executor
+    was not configured or timed out), matching the degraded behavior of
+    ``_compute_s_quality`` and ``_compute_s_security``.
+    """
     if test_results is None:
-        return 0.0
+        return _DEGRADED_NEUTRAL
     return 1.0 if test_results.get("passed") is True else 0.0
 
 
@@ -242,7 +247,10 @@ def _compute_weighted_score(
         "tests_pass": s_tests,
     }
 
-    # Vision weight redistribution
+    # Simultaneous vision + history weight redistribution
+    # Compute the total extra weight budget first, then scale base weights
+    # by (1 - total_extra) once — prevents sequential scaling from shrinking
+    # vision weight when history is also active.
     vision_weight = config.triage.vision.alignment_weight
     ai_analysis = state.ai_analysis
     vision_score_raw = (
@@ -251,19 +259,20 @@ def _compute_weighted_score(
         else None
     )
 
-    if vision_weight > 0 and vision_score_raw is not None:
-        scale = 1.0 - vision_weight
-        weights = {k: v * scale for k, v in base_weights.items()}
+    use_vision = vision_weight > 0 and vision_score_raw is not None
+    history_weight = config.pipeline.history_weight
+    use_history = history_weight > 0 and s_history is not None
+
+    total_extra = (vision_weight if use_vision else 0.0) + (
+        history_weight if use_history else 0.0
+    )
+    scale = 1.0 - total_extra
+    weights = {k: v * scale for k, v in base_weights.items()}
+
+    if use_vision:
         weights["vision_alignment"] = vision_weight
         scores["vision_alignment"] = _clamp(float(vision_score_raw) / 10.0, 0.0, 1.0)
-    else:
-        weights = dict(base_weights)
-
-    # History weight redistribution (applied after vision)
-    history_weight = config.pipeline.history_weight
-    if history_weight > 0 and s_history is not None:
-        scale = 1.0 - history_weight
-        weights = {k: v * scale for k, v in weights.items()}
+    if use_history:
         weights["history"] = history_weight
         scores["history"] = s_history
 
@@ -429,9 +438,23 @@ async def _ingest_results(
             static_findings=state.static_findings or [],
             ai_findings=ai_findings,
             verdict=verdict.model_dump(),
+            author=state.pr_author,
         )
+
+        # Persist attestation so GET /attestation/{id} returns data (Fix #1)
+        if state.attestation:
+            await intel_db.store_attestation(
+                attestation_id=str(state.attestation.get("attestation_id", "")),
+                pr_id=state.pr_id,
+                repo=state.repo,
+                pipeline_input_hash=str(state.attestation.get("pipeline_input_hash", "")),
+                pipeline_output_hash=str(state.attestation.get("pipeline_output_hash", "")),
+                signature=str(state.attestation.get("signature", "")),
+            )
     except Exception:
-        logger.warning("Failed to ingest pipeline results into intelligence DB")
+        logger.warning(
+            "Failed to ingest pipeline results into intelligence DB", exc_info=True,
+        )
 
 
 # ── Small helpers ────────────────────────────────────────────────────────────

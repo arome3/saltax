@@ -45,6 +45,14 @@ def _make_app() -> FastAPI:
 
     intel_db = AsyncMock()
     intel_db.count_patterns.return_value = 42
+    intel_db.get_stats.return_value = {
+        "total_patterns": 42,
+        "category_distribution": {},
+        "severity_distribution": {},
+        "avg_false_positive_rate": 0.0,
+        "patterns_last_7_days": 0,
+        "top_contributing_repos": [],
+    }
     intel_db.initialized = True
 
     pipeline = AsyncMock()
