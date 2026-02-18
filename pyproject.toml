@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=69.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "saltax"
+version = "1.0.0"
+description = "Sovereign AI agent that autonomously maintains open-source repositories"
+requires-python = ">=3.11"
+license = "MIT"
+
+dependencies = [
+    "fastapi>=0.109.0,<1.0",
+    "uvicorn[standard]>=0.27.0,<1.0",
+    "openai>=1.12.0,<2.0",
+    "web3>=6.15.0,<7.0",
+    "eth-account>=0.11.0,<1.0",
+    "pydantic>=2.6.0,<3.0",
+    "pydantic-settings>=2.1.0,<3.0",
+    "httpx>=0.27.0,<1.0",
+    "PyYAML>=6.0,<7.0",
+    "PyJWT[crypto]>=2.10.1,<3.0",
+    "python-json-logger>=2.0,<3.0",
+    "numpy>=1.26.0,<3.0",
+]
+
+[project.optional-dependencies]
+prod = [
+    "semgrep>=1.60.0,<2.0",
+]
+test = [
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.23.0,<1.0",
+    "pytest-cov>=4.1,<6.0",
+    "respx>=0.21.0,<1.0",
+]
+dev = [
+    "ruff>=0.3.0,<1.0",
+    "mypy>=1.8.0,<2.0",
+]
+
+[project.scripts]
+saltax = "src.main:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM", "TCH"]
+
+[tool.ruff.lint.flake8-type-checking]
+runtime-evaluated-base-classes = ["pydantic.BaseModel"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["web3.*", "eth_account.*", "semgrep.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"

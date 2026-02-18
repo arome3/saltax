@@ -1,0 +1,374 @@
+"""SaltaX bootstrap — 5-phase ordered initialization of the sovereign agent.
+
+Entry points
+~~~~~~~~~~~~
+- ``pyproject.toml`` console script: ``saltax = "src.main:main"``
+- Docker: ``python -m src.main``
+
+Phase sequence
+~~~~~~~~~~~~~~
+1. Configuration  — load YAML + env, cross-validate
+2. Cryptographic Identity — KMS, wallet, on-chain identity
+3. State Recovery — intelligence database
+4. Build Connections — pipeline, verification scheduler
+5. Start Services — FastAPI + uvicorn, scheduler task, TS proxy
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import signal
+import subprocess
+import sys
+from contextlib import suppress
+from typing import Any
+
+import uvicorn
+from pythonjsonlogger.jsonlogger import JsonFormatter
+
+from src.api.app import create_app
+from src.config import EnvConfig, SaltaXConfig, validate_config
+from src.github.client import GitHubClient
+from src.identity.registration import IdentityRegistrar
+from src.intelligence.database import IntelligenceDB
+from src.intelligence.sealing import KMSSealManager
+from src.pipeline.runner import build_pipeline
+from src.treasury.wallet import WalletManager
+from src.verification.scheduler import VerificationScheduler
+
+logger = logging.getLogger("saltax.bootstrap")
+
+_SHUTDOWN_TIMEOUT = 30.0
+
+
+# ── Pre-phase: structured logging ────────────────────────────────────────────
+
+
+def _configure_logging() -> None:
+    """Install JSON-formatted logging on the root logger.
+
+    Reads ``SALTAX_LOG_LEVEL`` from the environment (before :class:`EnvConfig`
+    is available) and defaults to ``INFO``.
+    """
+    level_name = os.environ.get("SALTAX_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    formatter = JsonFormatter("%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(formatter)
+
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(level)
+
+
+# ── TS proxy subprocess manager ──────────────────────────────────────────────
+
+
+class TSProxyManager:
+    """Manages the TypeScript GitHub-proxy subprocess lifecycle."""
+
+    def __init__(
+        self,
+        *,
+        max_retries: int = 3,
+        check_interval: float = 5.0,
+        terminate_timeout: float = 10.0,
+    ) -> None:
+        self._max_retries = max_retries
+        self._check_interval = check_interval
+        self._terminate_timeout = terminate_timeout
+        self._process: subprocess.Popen[bytes] | None = None
+        self._monitor_task: asyncio.Task[None] | None = None
+        self._retries = 0
+        self._stopped = False
+
+    def _start_process(self) -> subprocess.Popen[bytes]:
+        return subprocess.Popen(
+            ["node", "dist/index.js"],
+            cwd="github-proxy",
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def start(self) -> None:
+        """Launch the TS proxy and begin monitoring."""
+        self._stopped = False
+        self._retries = 0
+        self._process = self._start_process()
+        loop = asyncio.get_running_loop()
+        self._monitor_task = loop.create_task(self._monitor())
+
+    async def _monitor(self) -> None:
+        """Poll the subprocess and restart on crash up to *max_retries*."""
+        while not self._stopped:
+            await asyncio.sleep(self._check_interval)
+            if self._stopped:
+                break
+            if self._process is not None and self._process.poll() is not None:
+                self._retries += 1
+                if self._retries > self._max_retries:
+                    logger.error(
+                        "TS proxy exceeded max retries (%d), giving up",
+                        self._max_retries,
+                    )
+                    break
+                logger.warning(
+                    "TS proxy crashed (attempt %d/%d), restarting",
+                    self._retries,
+                    self._max_retries,
+                )
+                try:
+                    self._process = self._start_process()
+                except Exception:
+                    logger.exception(
+                        "Failed to restart TS proxy (attempt %d/%d)",
+                        self._retries,
+                        self._max_retries,
+                    )
+
+    async def stop(self) -> None:
+        """Gracefully stop the TS proxy subprocess."""
+        self._stopped = True
+
+        if self._monitor_task is not None:
+            self._monitor_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._monitor_task
+
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self._process.wait),
+                    timeout=self._terminate_timeout,
+                )
+            except TimeoutError:
+                self._process.kill()
+                await loop.run_in_executor(None, self._process.wait)
+
+    async def close(self) -> None:
+        """Resource-cleanup alias for :meth:`stop`."""
+        await self.stop()
+
+
+# ── Teardown ─────────────────────────────────────────────────────────────────
+
+
+async def _teardown(resources: list[tuple[str, Any]]) -> None:
+    """Close resources in reverse initialization order.
+
+    Each entry is ``(label, resource)``.  Resources must have an async
+    ``close()`` method.  Errors are logged but never re-raised so that all
+    resources get a chance to clean up.
+    """
+    for label, resource in reversed(resources):
+        try:
+            await resource.close()
+            logger.info("Closed %s", label)
+        except Exception:
+            logger.exception("Error closing %s", label)
+
+
+# ── Graceful shutdown ────────────────────────────────────────────────────────
+
+
+async def _graceful_shutdown(
+    *,
+    server: uvicorn.Server,
+    server_task: asyncio.Task[None],
+    scheduler: VerificationScheduler,
+    scheduler_task: asyncio.Task[None],
+    intel_db: IntelligenceDB,
+    kms: KMSSealManager,
+    ts_proxy: TSProxyManager,
+    timeout: float = _SHUTDOWN_TIMEOUT,
+) -> None:
+    """Execute the ordered shutdown sequence with a timeout.
+
+    Each step is individually wrapped so that a failure in one does not
+    prevent the remaining steps from executing.  A global timeout guards
+    against any single step hanging indefinitely.
+    """
+    logger.info("Beginning graceful shutdown")
+    try:
+        async with asyncio.timeout(timeout):
+            server.should_exit = True
+
+            try:
+                await scheduler.stop()
+            except Exception:
+                logger.exception("Error stopping scheduler")
+
+            try:
+                await intel_db.seal(kms)
+            except Exception:
+                logger.exception("Error sealing intelligence DB")
+
+            try:
+                await ts_proxy.stop()
+            except Exception:
+                logger.exception("Error stopping TS proxy")
+
+            try:
+                await server_task
+            except Exception:
+                logger.exception("Error awaiting server shutdown")
+    except TimeoutError:
+        logger.error("Graceful shutdown timed out after %.0fs", timeout)
+    finally:
+        for task in (server_task, scheduler_task):
+            if not task.done():
+                task.cancel()
+        with suppress(asyncio.CancelledError):
+            await asyncio.gather(server_task, scheduler_task, return_exceptions=True)
+    logger.info("SaltaX shutdown complete")
+
+
+# ── Bootstrap ────────────────────────────────────────────────────────────────
+
+
+async def bootstrap() -> None:  # noqa: C901
+    """Execute the 5-phase bootstrap sequence."""
+    _configure_logging()
+    logger.info("SaltaX bootstrap starting")
+
+    resources: list[tuple[str, Any]] = []
+
+    # ── Phase 1: Configuration ───────────────────────────────────────────
+    try:
+        logger.info("Phase 1: Configuration")
+        config = SaltaXConfig.load()
+        env = EnvConfig()
+        errors = validate_config(config)
+        if errors:
+            for err in errors:
+                logger.error("Config validation: %s", err)
+            sys.exit(1)
+        logger.info("Phase 1 complete — config validated")
+    except SystemExit:
+        raise
+    except Exception:
+        logger.exception("Phase 1 failed")
+        sys.exit(1)
+
+    # ── Phase 2: Cryptographic Identity ──────────────────────────────────
+    try:
+        logger.info("Phase 2: Cryptographic Identity")
+        kms = KMSSealManager(env.eigencloud_kms_endpoint)
+        resources.append(("kms", kms))
+        wallet = WalletManager(kms=kms)
+        resources.append(("wallet", wallet))
+        await wallet.initialize()
+        identity = IdentityRegistrar(wallet, env.identity_rpc_url, env.identity_chain_id)
+        resources.append(("identity", identity))
+        await identity.register_or_recover()
+        logger.info("Phase 2 complete — agent_id=%s wallet=%s", identity.agent_id, wallet.address)
+    except Exception:
+        logger.exception("Phase 2 failed")
+        await _teardown(resources)
+        sys.exit(1)
+
+    # ── Phase 3: State Recovery ──────────────────────────────────────────
+    try:
+        logger.info("Phase 3: State Recovery")
+        intel_db = IntelligenceDB(kms=kms)
+        await intel_db.initialize()
+        resources.append(("intel_db", intel_db))
+        pattern_count = await intel_db.count_patterns()
+        logger.info("Phase 3 complete — %d patterns loaded", pattern_count)
+    except Exception:
+        logger.exception("Phase 3 failed")
+        await _teardown(resources)
+        sys.exit(1)
+
+    # ── Phase 4: Build Connections ───────────────────────────────────────
+    try:
+        logger.info("Phase 4: Build Connections")
+        pipeline = build_pipeline(config, env, intel_db)
+        github_client = GitHubClient(
+            app_id=env.github_app_id,
+            private_key=env.github_app_private_key,
+        )
+        resources.append(("github_client", github_client))
+        scheduler = VerificationScheduler(config, wallet, intel_db)
+        resources.append(("scheduler", scheduler))
+        await scheduler.recover_pending_windows()
+        logger.info("Phase 4 complete — pipeline, GitHub client, and scheduler ready")
+    except Exception:
+        logger.exception("Phase 4 failed")
+        await _teardown(resources)
+        sys.exit(1)
+
+    # ── Phase 5: Start Services ──────────────────────────────────────────
+    scheduler_task: asyncio.Task[None] | None = None
+    server_task: asyncio.Task[None] | None = None
+    try:
+        logger.info("Phase 5: Start Services")
+        app = create_app(
+            config, env, pipeline, wallet, intel_db, identity, scheduler, github_client
+        )
+
+        scheduler_task = asyncio.create_task(scheduler.run())
+
+        ts_proxy = TSProxyManager()
+        ts_proxy.start()
+        resources.append(("ts_proxy", ts_proxy))
+
+        uvicorn_config = uvicorn.Config(
+            app,
+            host=env.host,
+            port=env.port,
+            log_level=env.log_level.lower(),
+        )
+        server = uvicorn.Server(uvicorn_config)
+
+        shutdown_event = asyncio.Event()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown_event.set)
+
+        server_task = asyncio.create_task(server.serve())
+
+        logger.info("Phase 5 complete — SaltaX is live on %s:%d", env.host, env.port)
+
+        # Block until shutdown signal
+        await shutdown_event.wait()
+        logger.info("Shutdown signal received")
+
+    except Exception:
+        logger.exception("Phase 5 failed")
+        for task in (scheduler_task, server_task):
+            if task is not None:
+                task.cancel()
+        await _teardown(resources)
+        sys.exit(1)
+
+    # ── Graceful shutdown ────────────────────────────────────────────────
+    await _graceful_shutdown(
+        server=server,
+        server_task=server_task,
+        scheduler=scheduler,
+        scheduler_task=scheduler_task,
+        intel_db=intel_db,
+        kms=kms,
+        ts_proxy=ts_proxy,
+    )
+
+
+# ── Sync entry point ─────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    """Sync entry point for ``pyproject.toml`` console script."""
+    asyncio.run(bootstrap())
+
+
+if __name__ == "__main__":
+    main()

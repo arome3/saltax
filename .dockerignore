@@ -1,0 +1,39 @@
+# Version control
+.git
+.gitignore
+
+# Environment / secrets
+.env
+.env.example
+
+# Tests and documentation
+tests/
+docs/
+contracts/
+
+# Node.js build artifacts (rebuilt in Docker)
+node_modules/
+github-proxy/dist/
+github-proxy/node_modules/
+
+# Python build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info
+*.egg
+dist/
+build/
+
+# Tooling caches
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.vscode
+.idea
+.DS_Store
+.claude/
+
+# Markdown (except README)
+CHANGELOG.md
+CONTRIBUTING.md
+LICENSE.md

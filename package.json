@@ -1,0 +1,16 @@
+{
+  "name": "saltax",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SaltaX — sovereign AI agent monorepo",
+  "workspaces": [
+    "github-proxy"
+  ],
+  "scripts": {
+    "build:proxy": "cd github-proxy && npm run build",
+    "start:proxy": "cd github-proxy && npm start"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

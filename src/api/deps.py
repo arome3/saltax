@@ -1,0 +1,61 @@
+"""FastAPI dependency-injection helpers.
+
+Each function extracts a service from ``request.app.state`` so that route
+handlers can declare dependencies via ``Depends(get_pipeline)`` instead of
+reaching into application state directly.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from fastapi import Request  # noqa: TC002 — FastAPI resolves annotations at runtime
+
+if TYPE_CHECKING:
+    from src.config import EnvConfig, SaltaXConfig
+    from src.github.client import GitHubClient
+    from src.identity.registration import IdentityRegistrar
+    from src.intelligence.database import IntelligenceDB
+    from src.pipeline.runner import Pipeline
+    from src.treasury.wallet import WalletManager
+    from src.verification.scheduler import VerificationScheduler
+
+
+def get_config(request: Request) -> SaltaXConfig:
+    """Return the YAML configuration object."""
+    return request.app.state.config  # type: ignore[no-any-return]
+
+
+def get_env(request: Request) -> EnvConfig:
+    """Return the runtime environment configuration."""
+    return request.app.state.env  # type: ignore[no-any-return]
+
+
+def get_pipeline(request: Request) -> Pipeline:
+    """Return the code-review pipeline runner."""
+    return request.app.state.pipeline  # type: ignore[no-any-return]
+
+
+def get_wallet(request: Request) -> WalletManager:
+    """Return the treasury wallet manager."""
+    return request.app.state.wallet  # type: ignore[no-any-return]
+
+
+def get_intel_db(request: Request) -> IntelligenceDB:
+    """Return the intelligence pattern database."""
+    return request.app.state.intel_db  # type: ignore[no-any-return]
+
+
+def get_identity(request: Request) -> IdentityRegistrar:
+    """Return the on-chain identity registrar."""
+    return request.app.state.identity  # type: ignore[no-any-return]
+
+
+def get_scheduler(request: Request) -> VerificationScheduler:
+    """Return the verification window scheduler."""
+    return request.app.state.scheduler  # type: ignore[no-any-return]
+
+
+def get_github_client(request: Request) -> GitHubClient:
+    """Return the GitHub API client."""
+    return request.app.state.github_client  # type: ignore[no-any-return]
