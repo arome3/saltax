@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from src.identity.registration import IdentityRegistrar
     from src.intelligence.database import IntelligenceDB
     from src.pipeline.runner import Pipeline
+    from src.treasury.manager import TreasuryManager
     from src.treasury.wallet import WalletManager
     from src.verification.scheduler import VerificationScheduler
 
@@ -43,6 +44,7 @@ def create_app(
     identity: IdentityRegistrar,
     scheduler: VerificationScheduler,
     github_client: GitHubClient,
+    treasury_mgr: TreasuryManager,
 ) -> FastAPI:
     """Build the FastAPI application with all dependencies wired to ``app.state``."""
 
@@ -67,6 +69,7 @@ def create_app(
     app.state.identity = identity
     app.state.scheduler = scheduler
     app.state.github_client = github_client
+    app.state.treasury_mgr = treasury_mgr
 
     # ── Global exception handlers ────────────────────────────────────
     _register_exception_handlers(app)

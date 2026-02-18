@@ -35,6 +35,8 @@ from src.identity.registration import IdentityRegistrar
 from src.intelligence.database import IntelligenceDB
 from src.intelligence.sealing import KMSSealManager
 from src.pipeline.runner import build_pipeline
+from src.treasury.manager import TreasuryManager
+from src.treasury.policy import TreasuryPolicy
 from src.treasury.wallet import WalletManager
 from src.verification.scheduler import VerificationScheduler
 
@@ -186,6 +188,7 @@ async def _graceful_shutdown(
     scheduler_task: asyncio.Task[None],
     intel_db: IntelligenceDB,
     kms: KMSSealManager,
+    wallet: WalletManager,
     ts_proxy: TSProxyManager,
     timeout: float = _SHUTDOWN_TIMEOUT,
 ) -> None:
@@ -209,6 +212,11 @@ async def _graceful_shutdown(
                 await intel_db.seal(kms)
             except Exception:
                 logger.exception("Error sealing intelligence DB")
+
+            try:
+                await wallet.seal()
+            except Exception:
+                logger.exception("Error sealing wallet key")
 
             try:
                 await ts_proxy.stop()
@@ -262,7 +270,7 @@ async def bootstrap() -> None:  # noqa: C901
         logger.info("Phase 2: Cryptographic Identity")
         kms = KMSSealManager(env.eigencloud_kms_endpoint)
         resources.append(("kms", kms))
-        wallet = WalletManager(kms=kms)
+        wallet = WalletManager(kms=kms, rpc_url=env.rpc_url, chain_id=env.chain_id)
         resources.append(("wallet", wallet))
         await wallet.initialize()
         identity = IdentityRegistrar(wallet, env.identity_rpc_url, env.identity_chain_id)
@@ -299,7 +307,16 @@ async def bootstrap() -> None:  # noqa: C901
         scheduler = VerificationScheduler(config, wallet, intel_db)
         resources.append(("scheduler", scheduler))
         await scheduler.recover_pending_windows()
-        logger.info("Phase 4 complete — pipeline, GitHub client, and scheduler ready")
+        treasury_policy = TreasuryPolicy(config.treasury)
+        treasury_mgr = TreasuryManager(
+            wallet=wallet,
+            policy=treasury_policy,
+            intel_db=intel_db,
+            treasury_config=config.treasury,
+            bounty_config=config.bounties,
+        )
+        resources.append(("treasury_mgr", treasury_mgr))
+        logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
         await _teardown(resources)
@@ -311,7 +328,15 @@ async def bootstrap() -> None:  # noqa: C901
     try:
         logger.info("Phase 5: Start Services")
         app = create_app(
-            config, env, pipeline, wallet, intel_db, identity, scheduler, github_client
+            config,
+            env,
+            pipeline,
+            wallet,
+            intel_db,
+            identity,
+            scheduler,
+            github_client,
+            treasury_mgr=treasury_mgr,
         )
 
         scheduler_task = asyncio.create_task(scheduler.run())
@@ -358,6 +383,7 @@ async def bootstrap() -> None:  # noqa: C901
         scheduler_task=scheduler_task,
         intel_db=intel_db,
         kms=kms,
+        wallet=wallet,
         ts_proxy=ts_proxy,
     )
 

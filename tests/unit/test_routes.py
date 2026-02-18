@@ -70,6 +70,14 @@ def _make_app() -> FastAPI:
     app.state.pipeline = pipeline
     app.state.github_client = AsyncMock()
 
+    treasury_mgr = AsyncMock()
+    treasury_mgr.check_balance.return_value = MagicMock(
+        balance_wei=0,
+        reserve_wei=0,
+        bounty_wei=0,
+    )
+    app.state.treasury_mgr = treasury_mgr
+
     return app
 
 
@@ -99,7 +107,8 @@ class TestStatusRoute:
         response = await client.get("/api/v1/status")
         data = response.json()
         assert "treasury" in data
-        assert data["treasury"]["balance"] == 0
+        assert data["treasury"]["balance_wei"] == 0
+        assert data["treasury"]["available"] is True
 
     async def test_returns_reputation_section(self, client: AsyncClient) -> None:
         response = await client.get("/api/v1/status")
@@ -393,6 +402,7 @@ class TestHealthz:
             identity=MagicMock(),
             scheduler=scheduler,
             github_client=AsyncMock(),
+            treasury_mgr=AsyncMock(),
         )
 
         transport = ASGITransport(app=app)
@@ -427,6 +437,7 @@ class TestHealthz:
             identity=MagicMock(),
             scheduler=scheduler,
             github_client=AsyncMock(),
+            treasury_mgr=AsyncMock(),
         )
 
         transport = ASGITransport(app=app)
@@ -460,6 +471,7 @@ class TestGlobalExceptionHandler:
             identity=MagicMock(),
             scheduler=MagicMock(),
             github_client=AsyncMock(),
+            treasury_mgr=AsyncMock(),
         )
 
         # Add a route that raises an unhandled error
@@ -495,6 +507,7 @@ class TestGlobalExceptionHandler:
             identity=MagicMock(),
             scheduler=MagicMock(),
             github_client=AsyncMock(),
+            treasury_mgr=AsyncMock(),
         )
 
         transport = ASGITransport(app=app)

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.identity.registration import IdentityRegistrar
     from src.intelligence.database import IntelligenceDB
     from src.pipeline.runner import Pipeline
+    from src.treasury.manager import TreasuryManager
     from src.treasury.wallet import WalletManager
     from src.verification.scheduler import VerificationScheduler
 
@@ -59,3 +60,8 @@ def get_scheduler(request: Request) -> VerificationScheduler:
 def get_github_client(request: Request) -> GitHubClient:
     """Return the GitHub API client."""
     return request.app.state.github_client  # type: ignore[no-any-return]
+
+
+def get_treasury_manager(request: Request) -> TreasuryManager:
+    """Return the treasury manager."""
+    return request.app.state.treasury_mgr  # type: ignore[no-any-return]

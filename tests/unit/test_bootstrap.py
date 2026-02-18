@@ -448,6 +448,13 @@ class TestGracefulShutdown:
 
         kms = MagicMock()
 
+        wallet = MagicMock()
+
+        async def track_wallet_seal() -> None:
+            order.append("wallet.seal")
+
+        wallet.seal = track_wallet_seal
+
         ts_proxy = MagicMock()
 
         async def track_ts_stop() -> None:
@@ -462,11 +469,12 @@ class TestGracefulShutdown:
             scheduler_task=scheduler_task,
             intel_db=intel_db,
             kms=kms,
+            wallet=wallet,
             ts_proxy=ts_proxy,
         )
 
         assert server.should_exit is True
-        assert order == ["scheduler.stop", "intel_db.seal", "ts_proxy.stop"]
+        assert order == ["scheduler.stop", "intel_db.seal", "wallet.seal", "ts_proxy.stop"]
 
     async def test_shutdown_continues_on_step_error(self) -> None:
         """If one shutdown step raises, the remaining steps still execute."""
@@ -493,6 +501,9 @@ class TestGracefulShutdown:
 
         kms = MagicMock()
 
+        wallet = MagicMock()
+        wallet.seal = AsyncMock()
+
         ts_proxy = MagicMock()
 
         async def track_ts_stop() -> None:
@@ -507,10 +518,11 @@ class TestGracefulShutdown:
             scheduler_task=scheduler_task,
             intel_db=intel_db,
             kms=kms,
+            wallet=wallet,
             ts_proxy=ts_proxy,
         )
 
-        # All three steps attempted despite the first one raising
+        # All four steps attempted despite the first one raising
         assert order == ["scheduler.stop", "intel_db.seal", "ts_proxy.stop"]
 
     async def test_shutdown_timeout(self) -> None:
@@ -528,6 +540,8 @@ class TestGracefulShutdown:
 
         intel_db = MagicMock()
         kms = MagicMock()
+        wallet = MagicMock()
+        wallet.seal = AsyncMock()
         ts_proxy = MagicMock()
 
         # Should complete quickly (not hang) due to the short timeout
@@ -538,11 +552,12 @@ class TestGracefulShutdown:
             scheduler_task=scheduler_task,
             intel_db=intel_db,
             kms=kms,
+            wallet=wallet,
             ts_proxy=ts_proxy,
             timeout=0.05,
         )
 
-        # intel_db.seal and ts_proxy.stop should NOT have been called
+        # intel_db.seal, wallet.seal, and ts_proxy.stop should NOT have been called
         # because scheduler.stop hung and the timeout fired first
         intel_db.seal.assert_not_called()
         ts_proxy.stop.assert_not_called()
@@ -572,6 +587,9 @@ class TestGracefulShutdown:
 
         kms = MagicMock()
 
+        wallet = MagicMock()
+        wallet.seal = AsyncMock()
+
         ts_proxy = MagicMock()
 
         async def noop_ts_stop() -> None:
@@ -586,6 +604,7 @@ class TestGracefulShutdown:
             scheduler_task=scheduler_task,
             intel_db=intel_db,
             kms=kms,
+            wallet=wallet,
             ts_proxy=ts_proxy,
         )
 
