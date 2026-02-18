@@ -23,6 +23,8 @@ from src.api.routes.webhook import router as webhook_router
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from src.api.middleware.tx_store import TxHashStore
+    from src.api.middleware.x402 import PaymentVerifier
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.identity.registration import IdentityRegistrar
@@ -45,6 +47,8 @@ def create_app(
     scheduler: VerificationScheduler,
     github_client: GitHubClient,
     treasury_mgr: TreasuryManager,
+    payment_verifier: PaymentVerifier,
+    tx_store: TxHashStore | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with all dependencies wired to ``app.state``."""
 
@@ -70,6 +74,8 @@ def create_app(
     app.state.scheduler = scheduler
     app.state.github_client = github_client
     app.state.treasury_mgr = treasury_mgr
+    app.state.payment_verifier = payment_verifier
+    app.state.tx_store = tx_store
 
     # ── Global exception handlers ────────────────────────────────────
     _register_exception_handlers(app)

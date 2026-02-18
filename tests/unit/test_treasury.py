@@ -641,7 +641,7 @@ class TestTreasuryManager:
             tx_hash="0xabc",
         )
         assert isinstance(record, TransactionRecord)
-        assert manager._total_revenue_wei == _1_ETH_WEI
+        assert manager._revenue_by_currency.get("ETH", 0) == _1_ETH_WEI
         assert manager._tx_count == 1
 
     async def test_payout_lock_serialization(

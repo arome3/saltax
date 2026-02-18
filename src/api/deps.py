@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 from fastapi import Request  # noqa: TC002 — FastAPI resolves annotations at runtime
 
 if TYPE_CHECKING:
+    from src.api.middleware.tx_store import TxHashStore
+    from src.api.middleware.x402 import PaymentVerifier
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.identity.registration import IdentityRegistrar
@@ -65,3 +67,13 @@ def get_github_client(request: Request) -> GitHubClient:
 def get_treasury_manager(request: Request) -> TreasuryManager:
     """Return the treasury manager."""
     return request.app.state.treasury_mgr  # type: ignore[no-any-return]
+
+
+def get_payment_verifier(request: Request) -> PaymentVerifier:
+    """Return the x402 payment verifier."""
+    return request.app.state.payment_verifier  # type: ignore[no-any-return]
+
+
+def get_tx_store(request: Request) -> TxHashStore:
+    """Return the durable transaction hash store."""
+    return request.app.state.tx_store  # type: ignore[no-any-return]

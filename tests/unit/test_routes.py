@@ -16,6 +16,15 @@ from src.api.routes.intelligence import router as intelligence_router
 from src.api.routes.status import router as status_router
 from src.api.routes.vision import router as vision_router
 
+
+@pytest.fixture(autouse=True)
+def _reset_audit_dedup(monkeypatch):
+    """Give each test a fresh _AuditDedup (clean caches, fresh asyncio.Lock)."""
+    from src.api.routes import audit
+
+    monkeypatch.setattr(audit, "_audit_dedup", audit._AuditDedup())
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
@@ -70,13 +79,42 @@ def _make_app() -> FastAPI:
     app.state.pipeline = pipeline
     app.state.github_client = AsyncMock()
 
-    treasury_mgr = AsyncMock()
-    treasury_mgr.check_balance.return_value = MagicMock(
-        balance_wei=0,
-        reserve_wei=0,
-        bounty_wei=0,
+    treasury_mgr = MagicMock()
+    treasury_mgr.check_balance = AsyncMock(
+        return_value=MagicMock(
+            balance_wei=0,
+            reserve_wei=0,
+            bounty_wei=0,
+        )
     )
     app.state.treasury_mgr = treasury_mgr
+
+    # x402 payment verifier — returns valid by default for backward compat
+    from src.api.middleware.x402 import PaymentRequirements, PaymentVerification
+
+    payment_verifier = MagicMock()
+    payment_verifier.build_requirements.return_value = PaymentRequirements(
+        amount_atomic=10_000_000,
+        resource="/api/v1/audit",
+        description="SaltaX full audit",
+        pay_to="0x" + "0" * 40,
+    )
+    payment_verifier.verify = AsyncMock(
+        return_value=PaymentVerification(
+            valid=True,
+            amount_atomic=10_000_000,
+            payer_address="0x" + "a" * 40,
+            tx_hash="0x" + "b" * 64,
+            payment_id="pay-mock-001",
+            error="",
+        )
+    )
+    app.state.payment_verifier = payment_verifier
+
+    # Durable tx_hash replay protection — default: no duplicates seen
+    tx_store = AsyncMock()
+    tx_store.check_and_record = AsyncMock(return_value=False)
+    app.state.tx_store = tx_store
 
     return app
 
@@ -129,35 +167,61 @@ class TestStatusRoute:
 
 
 class TestAuditRoute:
-    async def test_returns_402_without_payment(self, client: AsyncClient) -> None:
-        response = await client.post(
-            "/api/v1/audit",
-            json={
-                "repository_url": "https://github.com/owner/repo",
-                "commit_sha": "abc123",
-                "scope": "full",
-            },
+    async def test_returns_402_without_payment(self) -> None:
+        from src.api.middleware.x402 import PaymentRequirements, PaymentVerification
+
+        app = _make_app()
+        # Override verifier to return invalid
+        verifier = MagicMock()
+        verifier.build_requirements.return_value = PaymentRequirements(
+            amount_atomic=10_000_000,
+            resource="/api/v1/audit",
+            description="SaltaX full audit",
+            pay_to="0x" + "0" * 40,
         )
+        verifier.verify = AsyncMock(
+            return_value=PaymentVerification(
+                valid=False,
+                amount_atomic=0,
+                payer_address="",
+                tx_hash="",
+                payment_id="",
+                error="missing_payment_header",
+            )
+        )
+        app.state.payment_verifier = verifier
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/audit",
+                json={
+                    "repository_url": "https://github.com/owner/repo",
+                    "commit_sha": "abc123",
+                    "scope": "full",
+                },
+            )
         assert response.status_code == 402
         data = response.json()
         assert data["error"] == "Payment Required"
+        assert "PAYMENT-REQUIRED" in response.headers
 
     async def test_returns_202_with_valid_payment(self, client: AsyncClient) -> None:
-        payment = base64.b64encode(b"valid-payment-proof").decode()
         response = await client.post(
             "/api/v1/audit",
             json={
-                "repository_url": "https://github.com/owner/repo",
-                "commit_sha": "abc123",
+                "repository_url": "https://github.com/owner/repo-202",
+                "commit_sha": "abc123-202",
                 "scope": "security-only",
             },
-            headers={"X-PAYMENT": payment},
+            headers={"X-PAYMENT": "dGVzdA=="},
         )
         assert response.status_code == 202
         data = response.json()
         assert data["status"] == "accepted"
         assert data["audit_id"].startswith("audit-")
         assert data["scope"] == "security-only"
+        assert "payment_tx_hash" in data
 
     async def test_invalid_scope_returns_422(self, client: AsyncClient) -> None:
         response = await client.post(
@@ -403,6 +467,8 @@ class TestHealthz:
             scheduler=scheduler,
             github_client=AsyncMock(),
             treasury_mgr=AsyncMock(),
+            payment_verifier=MagicMock(),
+            tx_store=MagicMock(),
         )
 
         transport = ASGITransport(app=app)
@@ -438,6 +504,8 @@ class TestHealthz:
             scheduler=scheduler,
             github_client=AsyncMock(),
             treasury_mgr=AsyncMock(),
+            payment_verifier=MagicMock(),
+            tx_store=MagicMock(),
         )
 
         transport = ASGITransport(app=app)
@@ -472,6 +540,8 @@ class TestGlobalExceptionHandler:
             scheduler=MagicMock(),
             github_client=AsyncMock(),
             treasury_mgr=AsyncMock(),
+            payment_verifier=MagicMock(),
+            tx_store=MagicMock(),
         )
 
         # Add a route that raises an unhandled error
@@ -508,6 +578,8 @@ class TestGlobalExceptionHandler:
             scheduler=MagicMock(),
             github_client=AsyncMock(),
             treasury_mgr=AsyncMock(),
+            payment_verifier=MagicMock(),
+            tx_store=MagicMock(),
         )
 
         transport = ASGITransport(app=app)

@@ -38,13 +38,19 @@ class TreasurySnapshot:
 
 @dataclass(frozen=True, slots=True)
 class TransactionRecord:
-    """Immutable record of a treasury transaction."""
+    """Immutable record of a treasury transaction.
+
+    ``amount_wei`` stores the amount in the smallest unit of the currency:
+    Wei for ETH (10^18), atomic units for USDC (10^6).  The ``currency``
+    field disambiguates.
+    """
 
     tx_hash: str
     tx_type: str
     amount_wei: int
     counterparty: str
     timestamp: str
+    currency: str = "ETH"
     bounty_id: str = ""
     audit_id: str = ""
     metadata: dict[str, object] = field(default_factory=dict)
@@ -72,7 +78,7 @@ class TreasuryManager:
         self._bounty_config = bounty_config
         self._payout_lock = asyncio.Lock()
         self._tx_count: int = 0
-        self._total_revenue_wei: int = 0
+        self._revenue_by_currency: dict[str, int] = {}  # currency → total atomic
         self._total_expenditure_wei: int = 0
 
     # ── Balance queries ───────────────────────────────────────────────────
@@ -171,14 +177,19 @@ class TreasuryManager:
         tx_type: str,
         amount_wei: int,
         counterparty: str,
+        currency: str = "ETH",
         tx_hash: str | None = None,
         audit_id: str | None = None,
     ) -> TransactionRecord:
         """Record an incoming transaction (sponsorship, audit fee, penalty).
 
-        Updates the in-memory revenue counter.
+        Updates the per-currency revenue counter.  ``amount_wei`` stores
+        the value in the smallest unit of the given ``currency``
+        (Wei for ETH, atomic units for USDC).
         """
-        self._total_revenue_wei += amount_wei
+        self._revenue_by_currency[currency] = (
+            self._revenue_by_currency.get(currency, 0) + amount_wei
+        )
         self._tx_count += 1
         now = datetime.now(UTC).isoformat()
         return TransactionRecord(
@@ -187,6 +198,7 @@ class TreasuryManager:
             amount_wei=amount_wei,
             counterparty=counterparty,
             timestamp=now,
+            currency=currency,
             audit_id=audit_id or "",
         )
 

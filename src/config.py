@@ -300,6 +300,8 @@ class EnvConfig(BaseSettings):
     eigencloud_kms_endpoint: str
 
     # Optional with sensible defaults
+    facilitator_url: str = "https://x402.org/facilitator"
+    payment_wallet_address: str = ""
     eigenai_api_url: str = "https://eigenai.eigencloud.xyz/v1"
     rpc_url: str = "https://mainnet.base.org"
     chain_id: int = 8453

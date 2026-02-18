@@ -29,6 +29,8 @@ import uvicorn
 from pythonjsonlogger.jsonlogger import JsonFormatter
 
 from src.api.app import create_app
+from src.api.middleware.tx_store import TxHashStore
+from src.api.middleware.x402 import PaymentVerifier
 from src.config import EnvConfig, SaltaXConfig, validate_config
 from src.github.client import GitHubClient
 from src.identity.registration import IdentityRegistrar
@@ -316,6 +318,16 @@ async def bootstrap() -> None:  # noqa: C901
             bounty_config=config.bounties,
         )
         resources.append(("treasury_mgr", treasury_mgr))
+
+        payment_verifier = PaymentVerifier(
+            facilitator_url=env.facilitator_url,
+            pay_to_address=env.payment_wallet_address or wallet.address,
+        )
+        resources.append(("payment_verifier", payment_verifier))
+
+        tx_store = TxHashStore(db_path="data/tx_hashes.db")
+        await tx_store.initialize()
+        resources.append(("tx_store", tx_store))
         logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
@@ -337,6 +349,8 @@ async def bootstrap() -> None:  # noqa: C901
             scheduler,
             github_client,
             treasury_mgr=treasury_mgr,
+            payment_verifier=payment_verifier,
+            tx_store=tx_store,
         )
 
         scheduler_task = asyncio.create_task(scheduler.run())
