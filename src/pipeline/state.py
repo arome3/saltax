@@ -44,6 +44,7 @@ class PipelineState:
     attestation: dict[str, object] | None = None
 
     # ── Pipeline metadata ───────────────────────────────────────────────────
+    trace_id: str = ""
     pipeline_start_time: str = ""
     current_stage: str = ""
     error: str | None = None
