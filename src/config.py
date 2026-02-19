@@ -164,6 +164,8 @@ class StakingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
+    contract_address: str = ""
+    fallback_gas_limit: int = Field(default=200_000, gt=0)
     bonus_rate_no_challenge: float = Field(default=0.10, ge=0.0, le=1.0)
     bonus_rate_challenged_upheld: float = Field(default=0.20, ge=0.0, le=1.0)
     slash_rate_challenged_overturned: float = Field(default=0.50, ge=0.0, le=1.0)
@@ -360,7 +362,14 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             "contributors will not earn staking bonuses"
         )
 
-    # 5. Upheld bonus should exceed unchallenged bonus
+    # 5. Staking enabled but no contract address
+    if cfg.staking.enabled and not cfg.staking.contract_address:
+        errors.append(
+            "staking.enabled is True but staking.contract_address is empty — "
+            "on-chain staking operations will fail until a contract is deployed"
+        )
+
+    # 6. Upheld bonus should exceed unchallenged bonus
     if cfg.staking.bonus_rate_challenged_upheld <= cfg.staking.bonus_rate_no_challenge:
         errors.append(
             "staking.bonus_rate_challenged_upheld "
@@ -368,7 +377,7 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             f"staking.bonus_rate_no_challenge ({cfg.staking.bonus_rate_no_challenge})"
         )
 
-    # 6. Self-modification window must exceed standard window
+    # 7. Self-modification window must exceed standard window
     if (
         cfg.verification.self_modification_window_hours
         <= cfg.verification.standard_window_hours

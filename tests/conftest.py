@@ -65,6 +65,7 @@ VALID_YAML = textwrap.dedent("""\
 
     staking:
       enabled: true
+      contract_address: "0xCcCCccccCCCCcCCCCCCcCcCccCcCCCcCcccccccC"
       bonus_rate_no_challenge: 0.10
       bonus_rate_challenged_upheld: 0.20
       slash_rate_challenged_overturned: 0.50

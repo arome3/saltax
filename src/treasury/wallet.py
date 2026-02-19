@@ -186,6 +186,7 @@ class WalletManager:
         to: str,
         value_wei: int,
         data: bytes = b"",
+        gas: int | None = None,
     ) -> str:
         """Build, sign, and broadcast an EIP-1559 transaction.
 
@@ -210,7 +211,9 @@ class WalletManager:
                     )
                     max_fee, priority_fee = await self._estimate_eip1559_fees()
 
-                    gas = _CONTRACT_GAS if data else _SIMPLE_GAS
+                    gas_limit = gas if gas is not None else (
+                        _CONTRACT_GAS if data else _SIMPLE_GAS
+                    )
 
                     tx = {
                         "type": "0x2",
@@ -218,7 +221,7 @@ class WalletManager:
                         "to": to,
                         "value": value_wei,
                         "nonce": nonce,
-                        "gas": gas,
+                        "gas": gas_limit,
                         "maxFeePerGas": max_fee,
                         "maxPriorityFeePerGas": priority_fee,
                         "data": data,

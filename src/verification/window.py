@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from src.config import StakingConfig, VerificationConfig
     from src.intelligence.database import IntelligenceDB
+    from src.staking.economics import StakingEconomics
 
 logger = logging.getLogger(__name__)
 
@@ -140,10 +141,15 @@ def validate_challenge_stake(
 def compute_staking_bonus(
     window: dict[str, object],
     staking_config: StakingConfig,
+    _economics: StakingEconomics | None = None,
 ) -> int:
     """Compute the staking bonus in Wei for a completed window.
 
     Returns 0 if staking is disabled or stake is zero.
+
+    Pass a pre-built ``_economics`` instance to avoid repeated construction
+    when resolving multiple windows in a batch.  If ``None``, a new instance
+    is created (deferred import to avoid circular dependency).
     """
     if not staking_config.enabled:
         return 0
@@ -152,10 +158,13 @@ def compute_staking_bonus(
     if stake == 0:
         return 0
 
+    if _economics is None:
+        from src.staking.economics import StakingEconomics  # noqa: PLC0415
+        _economics = StakingEconomics(staking_config)
+
     resolution = window.get("resolution")
     if resolution == "upheld":
-        rate = staking_config.bonus_rate_challenged_upheld
+        _, bonus = _economics.calculate_return_challenged_upheld(stake)
     else:
-        rate = staking_config.bonus_rate_no_challenge
-
-    return int(stake * rate)
+        _, bonus = _economics.calculate_return_no_challenge(stake)
+    return bonus
