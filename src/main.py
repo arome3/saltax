@@ -359,7 +359,7 @@ async def bootstrap() -> None:  # noqa: C901
         )
         resources.append(("treasury_mgr", treasury_mgr))
         scheduler = VerificationScheduler(
-            config, intel_db, github_client, treasury_mgr,
+            config, intel_db, github_client, treasury_mgr, kms=kms,
         )
         resources.append(("scheduler", scheduler))
         await scheduler.recover_pending_windows()

@@ -256,6 +256,7 @@ class AgentConfig(BaseModel):
 
     name: str = "SaltaX"
     description: str = "Sovereign Code Organism"
+    repo: str = ""  # SaltaX's own repo full name, e.g. "owner/saltax"
 
 
 # ── Root config ──────────────────────────────────────────────────────────────

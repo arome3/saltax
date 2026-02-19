@@ -84,6 +84,7 @@ async def create_window(
         window_hours=hours,
         opens_at=opens_at,
         closes_at=closes_at,
+        is_self_modification=is_self_modification,
     )
 
     logger.info(

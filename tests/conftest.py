@@ -17,6 +17,7 @@ VALID_YAML = textwrap.dedent("""\
     agent:
       name: "SaltaX"
       description: "Sovereign Code Organism"
+      repo: ""
 
     pipeline:
       approval_threshold: 0.75

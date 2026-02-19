@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 5
+_CURRENT_SCHEMA_VERSION = 6
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS verification_windows (
     resolution           TEXT,
     contributor_stake_id TEXT,
     challenger_stake_id  TEXT,
+    is_self_modification INTEGER NOT NULL DEFAULT 0,
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL
 );
@@ -432,6 +433,13 @@ class IntelligenceDB:
                         "ALTER TABLE dispute_records "
                         "ADD COLUMN staking_applied INTEGER NOT NULL DEFAULT 0",
                     )
+                    await db.commit()
+                if current < 6:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        await db.execute(
+                            "ALTER TABLE verification_windows "
+                            "ADD COLUMN is_self_modification INTEGER NOT NULL DEFAULT 0",
+                        )
                     await db.commit()
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
@@ -984,6 +992,7 @@ class IntelligenceDB:
         window_hours: int,
         opens_at: str,
         closes_at: str,
+        is_self_modification: bool = False,
     ) -> None:
         """Create a verification window with all metadata."""
         db = self._require_db()
@@ -996,14 +1005,15 @@ class IntelligenceDB:
                      attestation_id, verdict_json, attestation_json,
                      contributor_address, bounty_amount_wei, stake_amount_wei,
                      window_hours, opens_at, closes_at, status,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                     is_self_modification, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
                 """,
                 (
                     window_id, pr_id, repo, pr_number, installation_id,
                     attestation_id, verdict_json, attestation_json,
                     contributor_address, bounty_amount_wei, stake_amount_wei,
-                    window_hours, opens_at, closes_at, now, now,
+                    window_hours, opens_at, closes_at,
+                    int(is_self_modification), now, now,
                 ),
             )
             await db.commit()

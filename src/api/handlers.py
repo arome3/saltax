@@ -66,6 +66,28 @@ async def handle_pr_event(
         # Fetch the diff via the GitHub client
         diff = await github_client.get_pr_diff(repo, pr_number, installation_id)
 
+        # Self-modification detection
+        is_self_mod = False
+        if config.agent.repo and repo == config.agent.repo:
+            try:
+                from src.selfmerge.detector import (  # noqa: PLC0415
+                    extract_modified_files,
+                    is_self_modification,
+                )
+
+                modified_files = extract_modified_files(diff)
+                is_self_mod = is_self_modification(modified_files)
+                if is_self_mod:
+                    logger.info(
+                        "Self-modification detected",
+                        extra={"pr_id": pr_data["pr_id"]},
+                    )
+            except Exception:
+                logger.exception(
+                    "Self-modification detection failed, defaulting to False",
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
+
         # Build pipeline state from PR data
         state_dict: dict[str, Any] = {
             "pr_id": pr_data["pr_id"],
@@ -80,6 +102,7 @@ async def handle_pr_event(
             "installation_id": installation_id,
             "pr_author_wallet": contributor_wallet,
             "bounty_amount_wei": bounty_amount_wei,
+            "is_self_modification": is_self_mod,
         }
 
         state = await pipeline.run(state_dict)

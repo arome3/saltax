@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from src.config import SaltaXConfig
     from src.github.client import GitHubClient
     from src.intelligence.database import IntelligenceDB
+    from src.intelligence.sealing import KMSSealManager
     from src.treasury.manager import TreasuryManager
 
 logger = logging.getLogger(__name__)
@@ -59,11 +60,13 @@ class VerificationScheduler:
         intel_db: IntelligenceDB,
         github_client: GitHubClient,
         treasury_mgr: TreasuryManager,
+        kms: KMSSealManager | None = None,
     ) -> None:
         self._config = config
         self._intel_db = intel_db
         self._github_client = github_client
         self._treasury_mgr = treasury_mgr
+        self._kms = kms
         self._stop_event = asyncio.Event()
 
     @property
@@ -184,6 +187,9 @@ class VerificationScheduler:
     async def _execute_window(self, window: dict[str, object]) -> None:
         """Execute an expired verification window: merge PR + send payout.
 
+        For self-modification windows, wraps the merge in a backup → merge →
+        health-check → rollback cycle under :data:`_self_merge_lock`.
+
         Uses a transient ``executing`` state to prevent challenges during
         merge and to allow retry on merge failure.
         """
@@ -200,7 +206,16 @@ class VerificationScheduler:
             )
             return
 
-        # Step 2: Merge PR
+        is_self_mod = bool(window.get("is_self_modification", 0))
+
+        if is_self_mod and self._kms is not None:
+            await self._execute_self_merge_window(window)
+        else:
+            await self._execute_normal_window(window)
+
+    async def _execute_normal_window(self, window: dict[str, object]) -> None:
+        """Standard merge + payout for non-self-modification windows."""
+        window_id = str(window["id"])
         repo = str(window["repo"])
         pr_number = int(window["pr_number"])  # type: ignore[arg-type]
         installation_id = int(window["installation_id"])  # type: ignore[arg-type]
@@ -220,7 +235,6 @@ class VerificationScheduler:
             )
             return
 
-        # Step 3: Mark executed
         await self._intel_db.transition_window_status(
             window_id, "executing", "executed", resolution="executed",
         )
@@ -229,8 +243,133 @@ class VerificationScheduler:
             extra={"window_id": window_id, "pr_number": pr_number},
         )
 
-        # Step 4: Send bounty (best effort)
         await self._send_payout(window)
+
+    async def _execute_self_merge_window(self, window: dict[str, object]) -> None:
+        """Self-merge cycle: backup → merge → health-check → rollback if unhealthy.
+
+        Acquires :data:`_self_merge_lock` to prevent concurrent self-merges.
+        """
+        from src.selfmerge.health_check import run_health_check  # noqa: PLC0415
+        from src.selfmerge.rollback import (  # noqa: PLC0415
+            ConfigRollback,
+            _self_merge_lock,
+        )
+        from src.selfmerge.upgrade_logger import log_upgrade_event  # noqa: PLC0415
+
+        window_id = str(window["id"])
+        repo = str(window["repo"])
+        pr_number = int(window["pr_number"])  # type: ignore[arg-type]
+        installation_id = int(window["installation_id"])  # type: ignore[arg-type]
+
+        async with _self_merge_lock:
+            # 1. Create backup
+            config_path = "saltax.config.yaml"
+            backup_name = f"selfmerge_{window_id}"
+            rollback = ConfigRollback(kms=self._kms)
+            rolled_back = False
+            health_passed = False
+
+            try:
+                await rollback.initialize()
+                await rollback.create_backup([config_path], backup_name)
+            except Exception:
+                logger.exception(
+                    "Self-merge backup failed, reverting to open",
+                    extra={"window_id": window_id},
+                )
+                await self._intel_db.transition_window_status(
+                    window_id, "executing", "open",
+                )
+                return
+
+            # 2. Merge PR
+            try:
+                await self._github_client.merge_pr(
+                    repo, pr_number, installation_id,
+                    commit_title=(
+                        f"SaltaX: self-merge PR #{pr_number} "
+                        f"(verification passed, backup={backup_name})"
+                    ),
+                )
+            except Exception:
+                logger.exception(
+                    "Self-merge failed, reverting to open",
+                    extra={"window_id": window_id, "pr_number": pr_number},
+                )
+                await self._intel_db.transition_window_status(
+                    window_id, "executing", "open",
+                )
+                return
+
+            # 3. Post-merge health check
+            try:
+                health = await run_health_check(config_path)
+                health_passed = health.healthy
+            except Exception:
+                logger.exception(
+                    "Health check crashed, treating as failure",
+                    extra={"window_id": window_id},
+                )
+                health_passed = False
+
+            # 4. Rollback if unhealthy
+            if not health_passed:
+                logger.critical(
+                    "Self-merge health check FAILED — rolling back config",
+                    extra={
+                        "window_id": window_id,
+                        "pr_number": pr_number,
+                        "checks_failed": getattr(health, "checks_failed", []),
+                    },
+                )
+                try:
+                    await rollback.restore_backup(backup_name)
+                    rolled_back = True
+                except Exception:
+                    logger.critical(
+                        "Rollback FAILED after health check failure — "
+                        "system may be in degraded state, halting scheduler",
+                        extra={"window_id": window_id},
+                    )
+                    await self.stop()
+                    return
+
+            # 5. Mark executed (merge already happened on GitHub)
+            await self._intel_db.transition_window_status(
+                window_id, "executing", "executed", resolution="executed",
+            )
+            logger.info(
+                "Self-merge window executed",
+                extra={
+                    "window_id": window_id,
+                    "pr_number": pr_number,
+                    "health_passed": health_passed,
+                    "rolled_back": rolled_back,
+                },
+            )
+
+            # 6. Log upgrade event (best-effort)
+            try:
+                await log_upgrade_event(
+                    intel_db=self._intel_db,
+                    pr_id=str(window.get("pr_id", "")),
+                    repo=repo,
+                    commit_sha="",
+                    modified_files=frozenset(),
+                    backup_name=backup_name,
+                    health_check_passed=health_passed,
+                    rolled_back=rolled_back,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to log upgrade event",
+                    extra={"window_id": window_id},
+                )
+
+            # 7. Send payout only if health passed
+            if health_passed:
+                await self._send_payout(window)
 
     async def _send_payout(self, window: dict[str, object]) -> None:
         """Send bounty + staking bonus payout (best effort, never raises)."""
