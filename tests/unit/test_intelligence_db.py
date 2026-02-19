@@ -121,7 +121,7 @@ class TestSchemaCreation:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 2
+        assert row[0] == 3
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -826,7 +826,14 @@ class TestGhostTableWritePaths:
             window_id="vw1",
             pr_id="owner/repo#1",
             repo="owner/repo",
+            pr_number=1,
+            installation_id=12345,
             attestation_id="attest-1",
+            verdict_json='{"decision": "APPROVE"}',
+            attestation_json='{"attestation_id": "attest-1"}',
+            contributor_address="0xabc",
+            bounty_amount_wei="1000",
+            stake_amount_wei="500",
             window_hours=24,
             opens_at="2024-01-01T00:00:00",
             closes_at="2024-01-02T00:00:00",
@@ -838,23 +845,32 @@ class TestGhostTableWritePaths:
             row = await cursor.fetchone()
         assert row[0] == 1
 
-    async def test_record_challenge(self, intel_db: IntelligenceDB) -> None:
+    async def test_transition_window_status(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
         await intel_db.store_verification_window(
             window_id="vw1",
             pr_id="owner/repo#1",
             repo="owner/repo",
+            pr_number=1,
+            installation_id=12345,
             attestation_id="attest-1",
+            verdict_json='{"decision": "APPROVE"}',
+            attestation_json='{"attestation_id": "attest-1"}',
+            contributor_address="0xabc",
+            bounty_amount_wei="1000",
+            stake_amount_wei="500",
             window_hours=24,
             opens_at="2024-01-01T00:00:00",
             closes_at="2024-01-02T00:00:00",
         )
-        await intel_db.record_challenge("vw1")
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT challenges FROM verification_windows WHERE id = 'vw1'",
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == 1
+        ok = await intel_db.transition_window_status(
+            "vw1", "open", "executing",
+        )
+        assert ok is True
+        window = await intel_db.get_verification_window("vw1")
+        assert window is not None
+        assert window["status"] == "executing"
 
     async def test_store_codebase_knowledge(
         self, intel_db: IntelligenceDB,

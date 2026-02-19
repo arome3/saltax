@@ -36,6 +36,8 @@ def _make_app(
     app.state.env = env_mock
     app.state.pipeline = pipeline or AsyncMock()
     app.state.github_client = github_client or AsyncMock()
+    app.state.intel_db = AsyncMock()
+    app.state.config = MagicMock()
 
     return app
 

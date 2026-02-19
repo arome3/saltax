@@ -8,6 +8,7 @@ via :class:`KMSSealManager` (TEE-sealed SQLite file).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -36,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 2
+_CURRENT_SCHEMA_VERSION = 3
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -117,15 +118,28 @@ CREATE TABLE IF NOT EXISTS active_bounties (
 );
 
 CREATE TABLE IF NOT EXISTS verification_windows (
-    id              TEXT PRIMARY KEY,
-    pr_id           TEXT NOT NULL,
-    repo            TEXT NOT NULL,
-    attestation_id  TEXT NOT NULL,
-    window_hours    INTEGER NOT NULL,
-    opens_at        TEXT NOT NULL,
-    closes_at       TEXT NOT NULL,
-    status          TEXT NOT NULL DEFAULT 'open',
-    challenges      INTEGER NOT NULL DEFAULT 0
+    id                   TEXT PRIMARY KEY,
+    pr_id                TEXT NOT NULL,
+    repo                 TEXT NOT NULL,
+    pr_number            INTEGER NOT NULL,
+    installation_id      INTEGER NOT NULL,
+    attestation_id       TEXT NOT NULL,
+    verdict_json         TEXT NOT NULL,
+    attestation_json     TEXT NOT NULL,
+    contributor_address  TEXT,
+    bounty_amount_wei    TEXT DEFAULT '0',
+    stake_amount_wei     TEXT DEFAULT '0',
+    window_hours         INTEGER NOT NULL,
+    opens_at             TEXT NOT NULL,
+    closes_at            TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'open',
+    challenge_id         TEXT,
+    challenger_address   TEXT,
+    challenger_stake_wei TEXT,
+    challenge_rationale  TEXT,
+    resolution           TEXT,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS pr_embeddings (
@@ -170,6 +184,7 @@ CREATE INDEX IF NOT EXISTS idx_as_pr ON attestation_store(pr_id);
 CREATE INDEX IF NOT EXISTS idx_ab_repo ON active_bounties(repo);
 CREATE INDEX IF NOT EXISTS idx_ab_status ON active_bounties(status);
 CREATE INDEX IF NOT EXISTS idx_vw_status ON verification_windows(status);
+CREATE INDEX IF NOT EXISTS idx_vw_closes_at ON verification_windows(closes_at);
 CREATE INDEX IF NOT EXISTS idx_pe_repo ON pr_embeddings(repo);
 CREATE INDEX IF NOT EXISTS idx_vd_repo ON vision_documents(repo);
 """
@@ -322,6 +337,36 @@ class IntelligenceDB:
                         "    updated_at      TEXT NOT NULL"
                         ");"
                     )
+                if current < 3:
+                    # Add new columns for expanded verification_windows schema.
+                    # Column names are hard-coded literals — no SQL injection risk.
+                    new_cols = [
+                        ("pr_number", "INTEGER NOT NULL DEFAULT 0"),
+                        ("installation_id", "INTEGER NOT NULL DEFAULT 0"),
+                        ("verdict_json", "TEXT NOT NULL DEFAULT '{}'"),
+                        ("attestation_json", "TEXT NOT NULL DEFAULT '{}'"),
+                        ("contributor_address", "TEXT"),
+                        ("bounty_amount_wei", "TEXT DEFAULT '0'"),
+                        ("stake_amount_wei", "TEXT DEFAULT '0'"),
+                        ("challenge_id", "TEXT"),
+                        ("challenger_address", "TEXT"),
+                        ("challenger_stake_wei", "TEXT"),
+                        ("challenge_rationale", "TEXT"),
+                        ("resolution", "TEXT"),
+                        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+                        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+                    ]
+                    for col_name, col_def in new_cols:
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            await db.execute(
+                                f"ALTER TABLE verification_windows "
+                                f"ADD COLUMN {col_name} {col_def}",
+                            )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_vw_closes_at "
+                        "ON verification_windows(closes_at)",
+                    )
+                    await db.commit()
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
                     (_CURRENT_SCHEMA_VERSION, now),
@@ -686,6 +731,18 @@ class IntelligenceDB:
 
         return approved / total
 
+    async def get_contributor_wallet(self, github_login: str) -> str | None:
+        """Look up wallet address by GitHub login.  Uses ``idx_cp_github`` index."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT wallet_address FROM contributor_profiles WHERE github_login = ?",
+            (github_login,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None or not row[0]:
+                return None
+            return str(row[0])
+
     # ── Stats (anonymized) ───────────────────────────────────────────────
 
     async def get_stats(self) -> dict[str, Any]:
@@ -850,36 +907,152 @@ class IntelligenceDB:
         window_id: str,
         pr_id: str,
         repo: str,
+        pr_number: int,
+        installation_id: int,
         attestation_id: str,
+        verdict_json: str,
+        attestation_json: str,
+        contributor_address: str | None,
+        bounty_amount_wei: str,
+        stake_amount_wei: str,
         window_hours: int,
         opens_at: str,
         closes_at: str,
     ) -> None:
-        """Create a verification window."""
+        """Create a verification window with all metadata."""
         db = self._require_db()
+        now = datetime.now(UTC).isoformat()
         async with self._write_lock:
             await db.execute(
                 """\
                 INSERT OR REPLACE INTO verification_windows
-                    (id, pr_id, repo, attestation_id, window_hours,
-                     opens_at, closes_at, status, challenges)
-                VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 0)
+                    (id, pr_id, repo, pr_number, installation_id,
+                     attestation_id, verdict_json, attestation_json,
+                     contributor_address, bounty_amount_wei, stake_amount_wei,
+                     window_hours, opens_at, closes_at, status,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)
                 """,
-                (window_id, pr_id, repo, attestation_id, window_hours,
-                 opens_at, closes_at),
+                (
+                    window_id, pr_id, repo, pr_number, installation_id,
+                    attestation_id, verdict_json, attestation_json,
+                    contributor_address, bounty_amount_wei, stake_amount_wei,
+                    window_hours, opens_at, closes_at, now, now,
+                ),
             )
             await db.commit()
 
-    async def record_challenge(self, window_id: str) -> None:
-        """Increment challenge count on a verification window."""
+    async def get_verification_window(
+        self, window_id: str,
+    ) -> dict[str, object] | None:
+        """Retrieve a verification window by ID."""
         db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows WHERE id = ?",
+            (window_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_expired_open_windows(
+        self, now_iso: str,
+    ) -> list[dict[str, object]]:
+        """Return open windows whose challenge period has elapsed."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows "
+            "WHERE status = 'open' AND closes_at <= ?",
+            (now_iso,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_open_windows(self) -> list[dict[str, object]]:
+        """Return all open verification windows."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows WHERE status = 'open'",
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_windows_by_status(
+        self, status: str,
+    ) -> list[dict[str, object]]:
+        """Return all verification windows with the given status."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows WHERE status = ?",
+            (status,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def transition_window_status(
+        self,
+        window_id: str,
+        expected_status: str,
+        new_status: str,
+        *,
+        resolution: str | None = None,
+        challenge_id: str | None = None,
+        challenger_address: str | None = None,
+        challenger_stake_wei: str | None = None,
+        challenge_rationale: str | None = None,
+    ) -> bool:
+        """Atomically transition window state. Returns True if transition happened.
+
+        Uses compare-and-swap: only updates if current status matches
+        ``expected_status``. Combined with ``_write_lock`` to prevent
+        concurrent coroutines from interleaving.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
         async with self._write_lock:
-            await db.execute(
-                "UPDATE verification_windows "
-                "SET challenges = challenges + 1 WHERE id = ?",
-                (window_id,),
+            set_parts = ["status = ?", "updated_at = ?"]
+            params: list[object] = [new_status, now]
+            # Column names below are hard-coded literals — no injection risk.
+            for col, val in [
+                ("resolution", resolution),
+                ("challenge_id", challenge_id),
+                ("challenger_address", challenger_address),
+                ("challenger_stake_wei", challenger_stake_wei),
+                ("challenge_rationale", challenge_rationale),
+            ]:
+                if val is not None:
+                    set_parts.append(f"{col} = ?")
+                    params.append(val)
+            params.extend([window_id, expected_status])
+            cursor = await db.execute(
+                f"UPDATE verification_windows SET {', '.join(set_parts)} "
+                f"WHERE id = ? AND status = ?",
+                params,
             )
+            affected = cursor.rowcount
             await db.commit()
+            return affected > 0
+
+    async def get_stale_challenged_windows(
+        self, deadline_iso: str,
+    ) -> list[dict[str, object]]:
+        """Return challenged/resolving windows with ``updated_at`` older than deadline."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows "
+            "WHERE status IN ('challenged', 'resolving') AND updated_at <= ?",
+            (deadline_iso,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_all_verification_windows(self) -> list[dict[str, object]]:
+        """Return all verification windows ordered by creation time."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM verification_windows ORDER BY created_at DESC",
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     # ── Codebase knowledge ───────────────────────────────────────────────
 

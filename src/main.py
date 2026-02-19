@@ -336,9 +336,6 @@ async def bootstrap() -> None:  # noqa: C901
             private_key=env.github_app_private_key,
         )
         resources.append(("github_client", github_client))
-        scheduler = VerificationScheduler(config, wallet, intel_db)
-        resources.append(("scheduler", scheduler))
-        await scheduler.recover_pending_windows()
         treasury_policy = TreasuryPolicy(config.treasury)
         treasury_mgr = TreasuryManager(
             wallet=wallet,
@@ -348,6 +345,11 @@ async def bootstrap() -> None:  # noqa: C901
             bounty_config=config.bounties,
         )
         resources.append(("treasury_mgr", treasury_mgr))
+        scheduler = VerificationScheduler(
+            config, intel_db, github_client, treasury_mgr,
+        )
+        resources.append(("scheduler", scheduler))
+        await scheduler.recover_pending_windows()
 
         payment_verifier = PaymentVerifier(
             facilitator_url=env.facilitator_url,

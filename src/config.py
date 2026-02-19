@@ -153,6 +153,8 @@ class VerificationConfig(BaseModel):
     standard_window_hours: int = Field(default=24, gt=0)
     self_modification_window_hours: int = Field(default=72, gt=0)
     min_challenge_stake_multiplier: float = Field(default=1.0, ge=0.0)
+    check_interval_seconds: int = Field(default=60, gt=0)
+    challenge_resolution_deadline_hours: int = Field(default=168, gt=0)  # 7 days
 
 
 # ── Staking ──────────────────────────────────────────────────────────────────

@@ -34,6 +34,8 @@ def _make_app() -> FastAPI:
     app.state.env = env_mock
     app.state.pipeline = AsyncMock()
     app.state.github_client = AsyncMock()
+    app.state.intel_db = AsyncMock()
+    app.state.config = MagicMock()
 
     return app
 

@@ -15,6 +15,7 @@ from src.api.middleware.rate_limiter import RateLimiterMiddleware
 from src.api.routes.attestation import router as attestation_router
 from src.api.routes.audit import router as audit_router
 from src.api.routes.bounties import router as bounties_router
+from src.api.routes.challenge import router as challenge_router
 from src.api.routes.identity import router as identity_router
 from src.api.routes.intelligence import router as intelligence_router
 from src.api.routes.status import router as status_router
@@ -93,6 +94,7 @@ def create_app(
     app.include_router(audit_router, prefix="/api/v1")
     app.include_router(attestation_router, prefix="/api/v1")
     app.include_router(bounties_router, prefix="/api/v1")
+    app.include_router(challenge_router, prefix="/api/v1")
     app.include_router(identity_router, prefix="/api/v1")
     app.include_router(intelligence_router, prefix="/api/v1")
     app.include_router(vision_router, prefix="/api/v1")

@@ -27,6 +27,8 @@ class PipelineState:
     base_branch: str
     head_branch: str
     pr_author: str
+    pr_number: int | None = None
+    installation_id: int | None = None
     pr_author_wallet: str | None = None
     bounty_amount_wei: int | None = None
     is_self_modification: bool = False

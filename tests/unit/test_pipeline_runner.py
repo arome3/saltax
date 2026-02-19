@@ -516,10 +516,11 @@ class TestPipelineClass:
             "base_branch": "main",
             "head_branch": "feat/x",
             "pr_author": "alice",
-            # Extra keys that aren't PipelineState fields
             "installation_id": 12345,
             "pr_number": 99,
+            # Extra keys that aren't PipelineState fields
             "action": "opened",
+            "webhook_delivery_id": "abc-123",
         }
 
         with patch(f"{_MODULE}.run_pipeline", new_callable=AsyncMock) as m_run:
@@ -529,7 +530,7 @@ class TestPipelineClass:
 
         call_state = m_run.call_args[0][0]
         assert isinstance(call_state, PipelineState)
-        assert not hasattr(call_state, "installation_id")
+        assert not hasattr(call_state, "webhook_delivery_id")
 
     async def test_build_pipeline_returns_pipeline(self) -> None:
         config = _make_config()
@@ -561,4 +562,6 @@ class TestPipelineStateFields:
         assert "pr_id" in _PIPELINE_STATE_FIELDS
         assert "repo" in _PIPELINE_STATE_FIELDS
         assert "commit_sha" in _PIPELINE_STATE_FIELDS
-        assert "installation_id" not in _PIPELINE_STATE_FIELDS
+        assert "installation_id" in _PIPELINE_STATE_FIELDS
+        assert "pr_number" in _PIPELINE_STATE_FIELDS
+        assert "action" not in _PIPELINE_STATE_FIELDS

@@ -138,6 +138,8 @@ async def github_webhook(
                 pr_data,
                 pipeline=request.app.state.pipeline,
                 github_client=request.app.state.github_client,
+                intel_db=request.app.state.intel_db,
+                config=request.app.state.config,
             )
 
         return Response(status_code=200, content="OK")
