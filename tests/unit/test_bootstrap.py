@@ -431,6 +431,14 @@ class TestGracefulShutdown:
         server = MagicMock()
         server_task = await _make_done_task()
         scheduler_task = await _make_done_task()
+        dispute_scheduler_task = await _make_done_task()
+
+        dispute_scheduler = MagicMock()
+
+        async def track_dispute_stop() -> None:
+            order.append("dispute_scheduler.stop")
+
+        dispute_scheduler.stop = track_dispute_stop
 
         scheduler = MagicMock()
 
@@ -470,6 +478,8 @@ class TestGracefulShutdown:
             server_task=server_task,
             scheduler=scheduler,
             scheduler_task=scheduler_task,
+            dispute_scheduler=dispute_scheduler,
+            dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
@@ -478,7 +488,10 @@ class TestGracefulShutdown:
         )
 
         assert server.should_exit is True
-        assert order == ["scheduler.stop", "intel_db.seal", "wallet.seal", "ts_proxy.stop"]
+        assert order == [
+            "dispute_scheduler.stop", "scheduler.stop",
+            "intel_db.seal", "wallet.seal", "ts_proxy.stop",
+        ]
 
     async def test_shutdown_continues_on_step_error(self) -> None:
         """If one shutdown step raises, the remaining steps still execute."""
@@ -487,6 +500,10 @@ class TestGracefulShutdown:
         server = MagicMock()
         server_task = await _make_done_task()
         scheduler_task = await _make_done_task()
+        dispute_scheduler_task = await _make_done_task()
+
+        dispute_scheduler = MagicMock()
+        dispute_scheduler.stop = AsyncMock()
 
         scheduler = MagicMock()
 
@@ -523,6 +540,8 @@ class TestGracefulShutdown:
             server_task=server_task,
             scheduler=scheduler,
             scheduler_task=scheduler_task,
+            dispute_scheduler=dispute_scheduler,
+            dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
@@ -530,7 +549,7 @@ class TestGracefulShutdown:
             ts_proxy=ts_proxy,
         )
 
-        # All four steps attempted despite the first one raising
+        # All steps attempted despite scheduler.stop raising
         assert order == ["scheduler.stop", "intel_db.seal", "ts_proxy.stop"]
 
     async def test_shutdown_timeout(self) -> None:
@@ -538,13 +557,17 @@ class TestGracefulShutdown:
         server = MagicMock()
         server_task = await _make_done_task()
         scheduler_task = await _make_done_task()
+        dispute_scheduler_task = await _make_done_task()
 
-        scheduler = MagicMock()
+        dispute_scheduler = MagicMock()
 
         async def hang() -> None:
             await asyncio.Event().wait()  # blocks forever
 
-        scheduler.stop = hang
+        dispute_scheduler.stop = hang
+
+        scheduler = MagicMock()
+        scheduler.stop = AsyncMock()
 
         intel_db = MagicMock()
         kms = MagicMock()
@@ -561,6 +584,8 @@ class TestGracefulShutdown:
             server_task=server_task,
             scheduler=scheduler,
             scheduler_task=scheduler_task,
+            dispute_scheduler=dispute_scheduler,
+            dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
@@ -569,8 +594,9 @@ class TestGracefulShutdown:
             timeout=0.05,
         )
 
-        # intel_db.seal, wallet.seal, and ts_proxy.stop should NOT have been called
-        # because scheduler.stop hung and the timeout fired first
+        # Nothing after dispute_scheduler.stop should have been called
+        # because it hung and the timeout fired first
+        scheduler.stop.assert_not_called()
         intel_db.seal.assert_not_called()
         ts_proxy.stop.assert_not_called()
 
@@ -578,10 +604,14 @@ class TestGracefulShutdown:
         """The finally block cancels tasks that are still running after shutdown."""
         server = MagicMock()
         server_task = await _make_done_task()
+        dispute_scheduler_task = await _make_done_task()
 
         # Scheduler task that hasn't completed yet
         never_done = asyncio.Event()
         scheduler_task = asyncio.create_task(never_done.wait())
+
+        dispute_scheduler = MagicMock()
+        dispute_scheduler.stop = AsyncMock()
 
         scheduler = MagicMock()
 
@@ -617,6 +647,8 @@ class TestGracefulShutdown:
             server_task=server_task,
             scheduler=scheduler,
             scheduler_task=scheduler_task,
+            dispute_scheduler=dispute_scheduler,
+            dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,

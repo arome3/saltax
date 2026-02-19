@@ -121,7 +121,7 @@ class TestSchemaCreation:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 3
+        assert row[0] == 5
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -218,6 +218,7 @@ class TestIngestPipelineResults:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
+        # 3 calls: INSERT(times_seen=1), UPDATE(+1=2), UPDATE(+1=3)
         assert row[0] == 3
 
     async def test_handles_empty_findings(self, intel_db: IntelligenceDB) -> None:

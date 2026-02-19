@@ -70,6 +70,15 @@ VALID_YAML = textwrap.dedent("""\
       bonus_rate_challenged_upheld: 0.20
       slash_rate_challenged_overturned: 0.50
 
+    disputes:
+      enabled: true
+      eigenverify_deadline_hours: 24
+      moltcourt_deadline_hours: 72
+      poll_interval_seconds: 300
+      max_submission_retries: 3
+      circuit_breaker_failure_threshold: 5
+      circuit_breaker_reset_seconds: 300
+
     audit_pricing:
       security_only_usdc: 5
       quality_only_usdc: 3

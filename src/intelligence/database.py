@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 3
+_CURRENT_SCHEMA_VERSION = 5
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS verification_windows (
     challenger_stake_wei TEXT,
     challenge_rationale  TEXT,
     resolution           TEXT,
+    contributor_stake_id TEXT,
+    challenger_stake_id  TEXT,
     created_at           TEXT NOT NULL,
     updated_at           TEXT NOT NULL
 );
@@ -171,6 +173,27 @@ CREATE TABLE IF NOT EXISTS agent_identity_cache (
     updated_at      TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dispute_records (
+    dispute_id           TEXT PRIMARY KEY,
+    challenge_id         TEXT NOT NULL,
+    window_id            TEXT NOT NULL,
+    dispute_type         TEXT NOT NULL,
+    claim_type           TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'pending',
+    provider_case_id     TEXT,
+    provider_verdict     TEXT,
+    attestation_json     TEXT,
+    challenger_address   TEXT NOT NULL,
+    challenger_stake_wei TEXT NOT NULL DEFAULT '0',
+    contributor_stake_id TEXT,
+    challenger_stake_id  TEXT,
+    submission_attempts  INTEGER NOT NULL DEFAULT 0,
+    staking_applied      INTEGER NOT NULL DEFAULT 0,
+    created_at           TEXT NOT NULL,
+    updated_at           TEXT NOT NULL,
+    resolved_at          TEXT
+);
+
 CREATE INDEX IF NOT EXISTS idx_vp_signature ON vulnerability_patterns(pattern_signature);
 CREATE INDEX IF NOT EXISTS idx_vp_rule_id ON vulnerability_patterns(rule_id);
 CREATE INDEX IF NOT EXISTS idx_vp_category ON vulnerability_patterns(category);
@@ -187,6 +210,8 @@ CREATE INDEX IF NOT EXISTS idx_vw_status ON verification_windows(status);
 CREATE INDEX IF NOT EXISTS idx_vw_closes_at ON verification_windows(closes_at);
 CREATE INDEX IF NOT EXISTS idx_pe_repo ON pr_embeddings(repo);
 CREATE INDEX IF NOT EXISTS idx_vd_repo ON vision_documents(repo);
+CREATE INDEX IF NOT EXISTS idx_dr_status ON dispute_records(status);
+CREATE INDEX IF NOT EXISTS idx_dr_window ON dispute_records(window_id);
 """
 
 
@@ -365,6 +390,47 @@ class IntelligenceDB:
                     await db.execute(
                         "CREATE INDEX IF NOT EXISTS idx_vw_closes_at "
                         "ON verification_windows(closes_at)",
+                    )
+                    await db.commit()
+                if current < 4:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS dispute_records ("
+                        "    dispute_id           TEXT PRIMARY KEY,"
+                        "    challenge_id         TEXT NOT NULL,"
+                        "    window_id            TEXT NOT NULL,"
+                        "    dispute_type         TEXT NOT NULL,"
+                        "    claim_type           TEXT NOT NULL,"
+                        "    status               TEXT NOT NULL DEFAULT 'pending',"
+                        "    provider_case_id     TEXT,"
+                        "    provider_verdict     TEXT,"
+                        "    attestation_json     TEXT,"
+                        "    challenger_address   TEXT NOT NULL,"
+                        "    challenger_stake_wei TEXT NOT NULL DEFAULT '0',"
+                        "    contributor_stake_id TEXT,"
+                        "    challenger_stake_id  TEXT,"
+                        "    submission_attempts  INTEGER NOT NULL DEFAULT 0,"
+                        "    created_at           TEXT NOT NULL,"
+                        "    updated_at           TEXT NOT NULL,"
+                        "    resolved_at          TEXT"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_dr_status "
+                        "ON dispute_records(status);"
+                        "CREATE INDEX IF NOT EXISTS idx_dr_window "
+                        "ON dispute_records(window_id);"
+                    )
+                    await db.commit()
+                if current < 5:
+                    await db.execute(
+                        "ALTER TABLE verification_windows "
+                        "ADD COLUMN contributor_stake_id TEXT",
+                    )
+                    await db.execute(
+                        "ALTER TABLE verification_windows "
+                        "ADD COLUMN challenger_stake_id TEXT",
+                    )
+                    await db.execute(
+                        "ALTER TABLE dispute_records "
+                        "ADD COLUMN staking_applied INTEGER NOT NULL DEFAULT 0",
                     )
                     await db.commit()
                 await db.execute(
@@ -999,6 +1065,8 @@ class IntelligenceDB:
         challenger_address: str | None = None,
         challenger_stake_wei: str | None = None,
         challenge_rationale: str | None = None,
+        contributor_stake_id: str | None = None,
+        challenger_stake_id: str | None = None,
     ) -> bool:
         """Atomically transition window state. Returns True if transition happened.
 
@@ -1018,6 +1086,8 @@ class IntelligenceDB:
                 ("challenger_address", challenger_address),
                 ("challenger_stake_wei", challenger_stake_wei),
                 ("challenge_rationale", challenge_rationale),
+                ("contributor_stake_id", contributor_stake_id),
+                ("challenger_stake_id", challenger_stake_id),
             ]:
                 if val is not None:
                     set_parts.append(f"{col} = ?")
@@ -1050,6 +1120,186 @@ class IntelligenceDB:
         db = self._require_db()
         async with db.execute(
             "SELECT * FROM verification_windows ORDER BY created_at DESC",
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    # ── Dispute records ────────────────────────────────────────────────────
+
+    async def store_dispute_record(
+        self,
+        *,
+        dispute_id: str,
+        challenge_id: str,
+        window_id: str,
+        dispute_type: str,
+        claim_type: str,
+        challenger_address: str,
+        challenger_stake_wei: str = "0",
+        contributor_stake_id: str | None = None,
+        challenger_stake_id: str | None = None,
+        attestation_json: str | None = None,
+    ) -> None:
+        """Persist a new dispute record (status=pending)."""
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT INTO dispute_records
+                    (dispute_id, challenge_id, window_id, dispute_type,
+                     claim_type, status, challenger_address,
+                     challenger_stake_wei, contributor_stake_id,
+                     challenger_stake_id, attestation_json,
+                     submission_attempts, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    dispute_id, challenge_id, window_id, dispute_type,
+                    claim_type, challenger_address, challenger_stake_wei,
+                    contributor_stake_id, challenger_stake_id,
+                    attestation_json, now, now,
+                ),
+            )
+            await db.commit()
+
+    async def check_and_insert_dispute(
+        self,
+        *,
+        dispute_id: str,
+        challenge_id: str,
+        window_id: str,
+        dispute_type: str,
+        claim_type: str,
+        challenger_address: str,
+        challenger_stake_wei: str = "0",
+        contributor_stake_id: str | None = None,
+        challenger_stake_id: str | None = None,
+        attestation_json: str | None = None,
+    ) -> bool:
+        """Atomically check for active disputes and insert if none exist.
+
+        Performs the duplicate check and insert under a single
+        ``_write_lock`` acquisition to prevent race conditions from
+        concurrent ``open_dispute`` calls.
+
+        Returns ``True`` if a new record was inserted, ``False`` if an
+        active dispute already exists for the window.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            # Check for existing active dispute
+            async with db.execute(
+                "SELECT dispute_id FROM dispute_records "
+                "WHERE window_id = ? AND status IN ('pending', 'submitted')",
+                (window_id,),
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    return False
+
+            await db.execute(
+                """\
+                INSERT INTO dispute_records
+                    (dispute_id, challenge_id, window_id, dispute_type,
+                     claim_type, status, challenger_address,
+                     challenger_stake_wei, contributor_stake_id,
+                     challenger_stake_id, attestation_json,
+                     submission_attempts, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, 0, ?, ?)
+                """,
+                (
+                    dispute_id, challenge_id, window_id, dispute_type,
+                    claim_type, challenger_address, challenger_stake_wei,
+                    contributor_stake_id, challenger_stake_id,
+                    attestation_json, now, now,
+                ),
+            )
+            await db.commit()
+            return True
+
+    # Pre-defined UPDATE statements per column — no f-string interpolation.
+    _DISPUTE_UPDATE_SQL: dict[str, str] = {
+        "status": (
+            "UPDATE dispute_records SET status = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+        "provider_case_id": (
+            "UPDATE dispute_records SET provider_case_id = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+        "provider_verdict": (
+            "UPDATE dispute_records SET provider_verdict = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+        "submission_attempts": (
+            "UPDATE dispute_records SET submission_attempts = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+        "resolved_at": (
+            "UPDATE dispute_records SET resolved_at = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+        "staking_applied": (
+            "UPDATE dispute_records SET staking_applied = ?, updated_at = ? "
+            "WHERE dispute_id = ?"
+        ),
+    }
+
+    async def update_dispute_record(
+        self,
+        dispute_id: str,
+        **kwargs: object,
+    ) -> None:
+        """Update specific fields on a dispute record.
+
+        Accepts keyword arguments matching column names.  Column names
+        are validated against a dict of pre-defined SQL statements to
+        prevent SQL injection — no column names are ever interpolated.
+        ``updated_at`` is always set to the current timestamp.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            for col, val in kwargs.items():
+                sql = self._DISPUTE_UPDATE_SQL.get(col)
+                if sql is None:
+                    raise ValueError(f"Cannot update column: {col}")
+                await db.execute(sql, (val, now, dispute_id))
+            await db.commit()
+
+    async def get_dispute_record(
+        self, dispute_id: str,
+    ) -> dict[str, object] | None:
+        """Retrieve a dispute record by ID."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM dispute_records WHERE dispute_id = ?",
+            (dispute_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_disputes_by_status(
+        self, status: str,
+    ) -> list[dict[str, object]]:
+        """Return all dispute records with the given status."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM dispute_records WHERE status = ?",
+            (status,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_disputes_for_window(
+        self, window_id: str,
+    ) -> list[dict[str, object]]:
+        """Return all dispute records for a verification window."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM dispute_records WHERE window_id = ?",
+            (window_id,),
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]

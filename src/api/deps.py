@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from src.api.middleware.tx_store import TxHashStore
     from src.api.middleware.x402 import PaymentVerifier
     from src.config import EnvConfig, SaltaXConfig
+    from src.disputes.router import DisputeRouter
     from src.github.client import GitHubClient
     from src.identity.registration import IdentityRegistrar
     from src.identity.reputation import ReputationManager
@@ -83,3 +84,8 @@ def get_tx_store(request: Request) -> TxHashStore:
 def get_reputation_manager(request: Request) -> ReputationManager:
     """Return the reputation manager."""
     return request.app.state.reputation_mgr  # type: ignore[no-any-return]
+
+
+def get_dispute_router(request: Request) -> DisputeRouter:
+    """Return the dispute router."""
+    return request.app.state.dispute_router  # type: ignore[no-any-return]

@@ -171,6 +171,25 @@ class StakingConfig(BaseModel):
     slash_rate_challenged_overturned: float = Field(default=0.50, ge=0.0, le=1.0)
 
 
+# ── Disputes ─────────────────────────────────────────────────────────────────
+
+
+class DisputeConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    eigenverify_base_url: str = "https://eigenverify.eigencloud.xyz/v1"
+    eigenverify_timeout_seconds: int = Field(default=30, gt=0)
+    eigenverify_deadline_hours: int = Field(default=24, gt=0)
+    moltcourt_base_url: str = "https://moltcourt.eigencloud.xyz/v1"
+    moltcourt_timeout_seconds: int = Field(default=30, gt=0)
+    moltcourt_deadline_hours: int = Field(default=72, gt=0)
+    poll_interval_seconds: int = Field(default=300, gt=0)
+    max_submission_retries: int = Field(default=3, ge=1)
+    circuit_breaker_failure_threshold: int = Field(default=5, ge=1)
+    circuit_breaker_reset_seconds: int = Field(default=300, gt=0)
+
+
 # ── Audit pricing ────────────────────────────────────────────────────────────
 
 
@@ -254,6 +273,7 @@ class SaltaXConfig(BaseModel):
     bounties: BountyConfig = Field(default_factory=BountyConfig)
     verification: VerificationConfig = Field(default_factory=VerificationConfig)
     staking: StakingConfig = Field(default_factory=StakingConfig)
+    disputes: DisputeConfig = Field(default_factory=DisputeConfig)
     audit_pricing: AuditPricingConfig = Field(default_factory=AuditPricingConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
 
@@ -313,6 +333,8 @@ class EnvConfig(BaseSettings):
     identity_chain_id: int = 11155111
     pinata_jwt: str = ""
     identity_bridge_url: str = "http://127.0.0.1:8081"
+    eigenverify_api_key: str = ""
+    moltcourt_api_key: str = ""
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8080

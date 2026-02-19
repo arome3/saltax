@@ -32,6 +32,10 @@ from src.api.app import create_app
 from src.api.middleware.tx_store import TxHashStore
 from src.api.middleware.x402 import PaymentVerifier
 from src.config import EnvConfig, SaltaXConfig, validate_config
+from src.disputes.eigen_verify import EigenVerifyClient
+from src.disputes.molt_court import MoltCourtClient
+from src.disputes.router import DisputeRouter
+from src.disputes.scheduler import DisputeScheduler
 from src.github.client import GitHubClient
 from src.identity.bridge_client import IdentityBridgeClient
 from src.identity.registration import IdentityRegistrar
@@ -39,6 +43,7 @@ from src.identity.reputation import ReputationManager
 from src.intelligence.database import IntelligenceDB
 from src.intelligence.sealing import KMSSealManager
 from src.pipeline.runner import build_pipeline
+from src.staking import StakeResolver, StakingContract, StakingEconomics
 from src.treasury.manager import TreasuryManager
 from src.treasury.policy import TreasuryPolicy
 from src.treasury.wallet import WalletManager
@@ -194,6 +199,8 @@ async def _graceful_shutdown(
     server_task: asyncio.Task[None],
     scheduler: VerificationScheduler,
     scheduler_task: asyncio.Task[None],
+    dispute_scheduler: DisputeScheduler,
+    dispute_scheduler_task: asyncio.Task[None],
     intel_db: IntelligenceDB,
     kms: KMSSealManager,
     wallet: WalletManager,
@@ -211,6 +218,11 @@ async def _graceful_shutdown(
     try:
         async with asyncio.timeout(timeout):
             server.should_exit = True
+
+            try:
+                await dispute_scheduler.stop()
+            except Exception:
+                logger.exception("Error stopping dispute scheduler")
 
             try:
                 await scheduler.stop()
@@ -246,11 +258,12 @@ async def _graceful_shutdown(
     except TimeoutError:
         logger.error("Graceful shutdown timed out after %.0fs", timeout)
     finally:
-        for task in (server_task, scheduler_task):
+        all_tasks = (server_task, scheduler_task, dispute_scheduler_task)
+        for task in all_tasks:
             if not task.done():
                 task.cancel()
         with suppress(asyncio.CancelledError):
-            await asyncio.gather(server_task, scheduler_task, return_exceptions=True)
+            await asyncio.gather(*all_tasks, return_exceptions=True)
     logger.info("SaltaX shutdown complete")
 
 
@@ -365,6 +378,27 @@ async def bootstrap() -> None:  # noqa: C901
             bridge_client, intel_db, identity.agent_id or "",
         )
         resources.append(("reputation_mgr", reputation_mgr))
+
+        # Dispute resolution subsystem
+        eigen_client = EigenVerifyClient(config.disputes, env.eigenverify_api_key)
+        resources.append(("eigen_client", eigen_client))
+        molt_client = MoltCourtClient(config.disputes, env.moltcourt_api_key)
+        resources.append(("molt_client", molt_client))
+        staking_economics = StakingEconomics(config.staking)
+        staking_contract = StakingContract(wallet, config.staking, env.rpc_url)
+        if config.staking.enabled and config.staking.contract_address:
+            await staking_contract.initialize()
+            resources.append(("staking_contract", staking_contract))
+        stake_resolver = StakeResolver(staking_contract, staking_economics)
+        dispute_router = DisputeRouter(
+            config.disputes, intel_db, eigen_client, molt_client,
+            stake_resolver, staking_contract,
+        )
+        resources.append(("dispute_router", dispute_router))
+        dispute_scheduler = DisputeScheduler(
+            config.disputes, intel_db, dispute_router, scheduler,
+        )
+        resources.append(("dispute_scheduler", dispute_scheduler))
         logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
@@ -373,6 +407,7 @@ async def bootstrap() -> None:  # noqa: C901
 
     # ── Phase 5: Start Services ──────────────────────────────────────────
     scheduler_task: asyncio.Task[None] | None = None
+    dispute_scheduler_task: asyncio.Task[None] | None = None
     server_task: asyncio.Task[None] | None = None
     try:
         logger.info("Phase 5: Start Services")
@@ -389,9 +424,11 @@ async def bootstrap() -> None:  # noqa: C901
             payment_verifier=payment_verifier,
             tx_store=tx_store,
             reputation_mgr=reputation_mgr,
+            dispute_router_inst=dispute_router,
         )
 
         scheduler_task = asyncio.create_task(scheduler.run())
+        dispute_scheduler_task = asyncio.create_task(dispute_scheduler.run())
 
         # Build identity env for the TS proxy subprocess
         identity_env: dict[str, str] = {
@@ -435,7 +472,7 @@ async def bootstrap() -> None:  # noqa: C901
 
     except Exception:
         logger.exception("Phase 5 failed")
-        for task in (scheduler_task, server_task):
+        for task in (scheduler_task, dispute_scheduler_task, server_task):
             if task is not None:
                 task.cancel()
         await _teardown(resources)
@@ -447,6 +484,8 @@ async def bootstrap() -> None:  # noqa: C901
         server_task=server_task,
         scheduler=scheduler,
         scheduler_task=scheduler_task,
+        dispute_scheduler=dispute_scheduler,
+        dispute_scheduler_task=dispute_scheduler_task,
         intel_db=intel_db,
         kms=kms,
         wallet=wallet,

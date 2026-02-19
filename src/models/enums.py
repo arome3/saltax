@@ -101,6 +101,30 @@ class DisputeType(StrEnum):
     SUBJECTIVE = "subjective"  # MoltCourt
 
 
+# ── Dispute status ──────────────────────────────────────────────────────────
+
+
+class DisputeStatus(StrEnum):
+    """Lifecycle states for a dispute record."""
+
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    RESOLVED = "resolved"
+    TIMED_OUT = "timed_out"
+    MANUAL_REVIEW = "manual_review"
+    FAILED = "failed"
+
+
+# ── Claim type ──────────────────────────────────────────────────────────────
+
+
+class ClaimType(StrEnum):
+    """Types of dispute claims a challenger can file."""
+
+    AI_OUTPUT_INCORRECT = "ai_output_incorrect"
+    SCORING_UNFAIR = "scoring_unfair"
+
+
 # ── Audit scope ─────────────────────────────────────────────────────────────
 
 

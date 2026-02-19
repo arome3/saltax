@@ -60,3 +60,39 @@ class VerificationWindowResponse(BaseModel):
 class VerificationWindowListResponse(BaseModel):
     windows: list[VerificationWindowResponse]
     count: int
+
+
+# ── Dispute models ──────────────────────────────────────────────────────
+
+
+class DisputeRequest(BaseModel):
+    window_id: str
+    challenge_id: str
+    claim_type: str = Field(min_length=1)
+
+
+class DisputeResponse(BaseModel):
+    success: bool
+    message: str
+    dispute_id: str | None = None
+
+
+class DisputeRecordResponse(BaseModel):
+    dispute_id: str
+    challenge_id: str
+    window_id: str
+    dispute_type: str
+    claim_type: str
+    status: str
+    provider_case_id: str | None
+    provider_verdict: str | None
+    challenger_address: str
+    submission_attempts: int
+    created_at: str
+    updated_at: str
+    resolved_at: str | None
+
+
+class DisputeListResponse(BaseModel):
+    disputes: list[DisputeRecordResponse]
+    count: int

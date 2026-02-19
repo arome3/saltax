@@ -16,6 +16,7 @@ from src.api.routes.attestation import router as attestation_router
 from src.api.routes.audit import router as audit_router
 from src.api.routes.bounties import router as bounties_router
 from src.api.routes.challenge import router as challenge_router
+from src.api.routes.dispute import router as dispute_router
 from src.api.routes.identity import router as identity_router
 from src.api.routes.intelligence import router as intelligence_router
 from src.api.routes.status import router as status_router
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from src.api.middleware.tx_store import TxHashStore
     from src.api.middleware.x402 import PaymentVerifier
     from src.config import EnvConfig, SaltaXConfig
+    from src.disputes.router import DisputeRouter
     from src.github.client import GitHubClient
     from src.identity.registration import IdentityRegistrar
     from src.identity.reputation import ReputationManager
@@ -53,6 +55,7 @@ def create_app(
     payment_verifier: PaymentVerifier,
     tx_store: TxHashStore | None = None,
     reputation_mgr: ReputationManager | None = None,
+    dispute_router_inst: DisputeRouter | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with all dependencies wired to ``app.state``."""
 
@@ -81,6 +84,7 @@ def create_app(
     app.state.payment_verifier = payment_verifier
     app.state.tx_store = tx_store
     app.state.reputation_mgr = reputation_mgr
+    app.state.dispute_router = dispute_router_inst
 
     # ── Global exception handlers ────────────────────────────────────
     _register_exception_handlers(app)
@@ -95,6 +99,7 @@ def create_app(
     app.include_router(attestation_router, prefix="/api/v1")
     app.include_router(bounties_router, prefix="/api/v1")
     app.include_router(challenge_router, prefix="/api/v1")
+    app.include_router(dispute_router, prefix="/api/v1")
     app.include_router(identity_router, prefix="/api/v1")
     app.include_router(intelligence_router, prefix="/api/v1")
     app.include_router(vision_router, prefix="/api/v1")
