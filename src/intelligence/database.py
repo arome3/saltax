@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 6
+_CURRENT_SCHEMA_VERSION = 8
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -97,13 +97,20 @@ CREATE TABLE IF NOT EXISTS pipeline_history (
 );
 
 CREATE TABLE IF NOT EXISTS attestation_store (
-    attestation_id       TEXT PRIMARY KEY,
-    pr_id                TEXT NOT NULL,
-    repo                 TEXT NOT NULL,
-    pipeline_input_hash  TEXT NOT NULL,
-    pipeline_output_hash TEXT NOT NULL,
-    signature            TEXT NOT NULL DEFAULT '',
-    created_at           TEXT NOT NULL
+    attestation_id          TEXT PRIMARY KEY,
+    pr_id                   TEXT NOT NULL,
+    repo                    TEXT NOT NULL,
+    pipeline_input_hash     TEXT NOT NULL,
+    pipeline_output_hash    TEXT NOT NULL,
+    signature               TEXT NOT NULL DEFAULT '',
+    docker_image_digest     TEXT NOT NULL DEFAULT '',
+    tee_platform_id         TEXT NOT NULL DEFAULT '',
+    previous_attestation_id TEXT,
+    ai_seed                 INTEGER,
+    ai_output_hash          TEXT,
+    ai_system_fingerprint   TEXT,
+    signer_address          TEXT NOT NULL DEFAULT '',
+    created_at              TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS active_bounties (
@@ -205,6 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_ph_repo ON pipeline_history(repo);
 CREATE INDEX IF NOT EXISTS idx_ph_pr_author ON pipeline_history(pr_author);
 CREATE INDEX IF NOT EXISTS idx_ph_created ON pipeline_history(created_at);
 CREATE INDEX IF NOT EXISTS idx_as_pr ON attestation_store(pr_id);
+CREATE INDEX IF NOT EXISTS idx_as_created ON attestation_store(created_at);
 CREATE INDEX IF NOT EXISTS idx_ab_repo ON active_bounties(repo);
 CREATE INDEX IF NOT EXISTS idx_ab_status ON active_bounties(status);
 CREATE INDEX IF NOT EXISTS idx_vw_status ON verification_windows(status);
@@ -440,6 +448,37 @@ class IntelligenceDB:
                             "ALTER TABLE verification_windows "
                             "ADD COLUMN is_self_modification INTEGER NOT NULL DEFAULT 0",
                         )
+                    await db.commit()
+                if current < 7:
+                    new_cols_v7 = [
+                        ("docker_image_digest", "TEXT NOT NULL DEFAULT ''"),
+                        ("tee_platform_id", "TEXT NOT NULL DEFAULT ''"),
+                        ("previous_attestation_id", "TEXT"),
+                    ]
+                    for col_name, col_def in new_cols_v7:
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            await db.execute(
+                                f"ALTER TABLE attestation_store "
+                                f"ADD COLUMN {col_name} {col_def}",
+                            )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_as_created "
+                        "ON attestation_store(created_at)",
+                    )
+                    await db.commit()
+                if current < 8:
+                    new_cols_v8 = [
+                        ("ai_seed", "INTEGER"),
+                        ("ai_output_hash", "TEXT"),
+                        ("ai_system_fingerprint", "TEXT"),
+                        ("signer_address", "TEXT NOT NULL DEFAULT ''"),
+                    ]
+                    for col_name, col_def in new_cols_v8:
+                        with contextlib.suppress(sqlite3.OperationalError):
+                            await db.execute(
+                                f"ALTER TABLE attestation_store "
+                                f"ADD COLUMN {col_name} {col_def}",
+                            )
                     await db.commit()
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
@@ -901,22 +940,50 @@ class IntelligenceDB:
         pipeline_input_hash: str,
         pipeline_output_hash: str,
         signature: str = "",
-    ) -> None:
-        """Persist an attestation proof."""
+        docker_image_digest: str = "",
+        tee_platform_id: str = "",
+        previous_attestation_id: str | None = None,
+        ai_seed: int | None = None,
+        ai_output_hash: str | None = None,
+        ai_system_fingerprint: str | None = None,
+        signer_address: str = "",
+        created_at: str | None = None,
+    ) -> bool:
+        """Persist an attestation proof.
+
+        Uses ``INSERT OR IGNORE`` — a duplicate ``attestation_id`` is
+        silently skipped, preserving the original proof and chain integrity.
+        Returns ``True`` if the proof was inserted, ``False`` if it already
+        existed.
+        """
         db = self._require_db()
-        now = datetime.now(UTC).isoformat()
+        ts = created_at or datetime.now(UTC).isoformat()
         async with self._write_lock:
+            # Check for duplicate before insert (inside write lock — no race)
+            async with db.execute(
+                "SELECT 1 FROM attestation_store WHERE attestation_id = ?",
+                (attestation_id,),
+            ) as cursor:
+                if await cursor.fetchone() is not None:
+                    return False
             await db.execute(
                 """\
-                INSERT OR REPLACE INTO attestation_store
+                INSERT INTO attestation_store
                     (attestation_id, pr_id, repo, pipeline_input_hash,
-                     pipeline_output_hash, signature, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     pipeline_output_hash, signature, docker_image_digest,
+                     tee_platform_id, previous_attestation_id,
+                     ai_seed, ai_output_hash, ai_system_fingerprint,
+                     signer_address, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (attestation_id, pr_id, repo, pipeline_input_hash,
-                 pipeline_output_hash, signature, now),
+                 pipeline_output_hash, signature, docker_image_digest,
+                 tee_platform_id, previous_attestation_id,
+                 ai_seed, ai_output_hash, ai_system_fingerprint,
+                 signer_address, ts),
             )
             await db.commit()
+            return True
 
     async def get_attestation(self, attestation_id: str) -> dict[str, object] | None:
         """Retrieve an attestation by ID."""
@@ -927,6 +994,42 @@ class IntelligenceDB:
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def get_latest_attestation_id(self) -> str | None:
+        """Return the attestation_id of the most recent attestation, or None."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT attestation_id FROM attestation_store "
+            "ORDER BY created_at DESC LIMIT 1",
+        ) as cursor:
+            row = await cursor.fetchone()
+            return str(row[0]) if row else None
+
+    async def get_attestation_chain(
+        self, start_id: str, count: int = 10,
+    ) -> list[dict[str, object]]:
+        """Walk the attestation chain backwards from *start_id*.
+
+        Follows ``previous_attestation_id`` links up to *count* entries.
+        """
+        db = self._require_db()
+        chain: list[dict[str, object]] = []
+        current_id: str | None = start_id
+        for _ in range(count):
+            if current_id is None:
+                break
+            async with db.execute(
+                "SELECT * FROM attestation_store WHERE attestation_id = ?",
+                (current_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                break
+            entry = dict(row)
+            chain.append(entry)
+            prev = entry.get("previous_attestation_id")
+            current_id = str(prev) if prev else None
+        return chain
 
     # ── Bounties ─────────────────────────────────────────────────────────
 

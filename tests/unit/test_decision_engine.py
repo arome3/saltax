@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
-import pytest
-
 from src.config import SaltaXConfig
+from src.models.attestation import AttestationProof
 from src.models.enums import Decision
 from src.pipeline.stages.decision_engine import (
-    _build_attestation,
     _clamp,
     _compute_s_history,
     _compute_s_quality,
@@ -27,6 +26,16 @@ from src.pipeline.state import PipelineState
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.decision_engine"
+
+_FIXED_PROOF = AttestationProof(
+    attestation_id="attest-test-abc12345",
+    docker_image_digest="sha256:abc",
+    tee_platform_id="dev",
+    pipeline_input_hash="a" * 64,
+    pipeline_output_hash="b" * 64,
+    signature="",
+    timestamp=datetime.now(UTC),
+)
 
 
 def _make_state(**overrides: object) -> PipelineState:
@@ -52,6 +61,12 @@ def _make_intel_db() -> AsyncMock:
     db = AsyncMock()
     db.ingest_pipeline_results = AsyncMock()
     return db
+
+
+def _make_attestation_engine() -> AsyncMock:
+    eng = AsyncMock()
+    eng.generate_proof = AsyncMock(return_value=_FIXED_PROOF)
+    return eng
 
 
 def _make_ai_analysis(**overrides: object) -> dict[str, object]:
@@ -267,12 +282,9 @@ class TestStandardApproval:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.APPROVE.value
@@ -298,12 +310,9 @@ class TestStandardRejection:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.REJECT.value
@@ -327,12 +336,9 @@ class TestRequestChanges:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         # s_static=1.0, s_quality=0.6, s_security=0.5, s_tests=0.0
@@ -352,12 +358,9 @@ class TestShortCircuit:
         state = _make_state(short_circuit=True)
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.REJECT.value
@@ -367,12 +370,9 @@ class TestShortCircuit:
         state = _make_state(short_circuit=True)
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.attestation is not None
         assert state.attestation["attestation_id"].startswith("attest-")
@@ -388,8 +388,6 @@ class TestSelfModification:
 
     async def test_high_but_below_self_mod_threshold(self) -> None:
         """Score 0.875 passes standard (0.75) but fails self-mod (0.90)."""
-        # s_static=1.0, s_quality=0.75, s_security=0.75, s_tests=1.0
-        # composite = 0.25*(1.0 + 0.75 + 0.75 + 1.0) = 0.875
         state = _make_state(
             is_self_modification=True,
             ai_analysis=_make_ai_analysis(
@@ -400,12 +398,9 @@ class TestSelfModification:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.REQUEST_CHANGES.value
@@ -422,12 +417,9 @@ class TestSelfModification:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.APPROVE.value
@@ -500,12 +492,9 @@ class TestDegradedAI:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         breakdown = state.verdict["score_breakdown"]
@@ -531,12 +520,9 @@ class TestMissingTestResults:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["score_breakdown"]["tests_pass"] == 0.5
@@ -570,38 +556,12 @@ class TestBoundaryConditions:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# P. Attestation proof
+# P. Attestation proof via engine
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestAttestationProof:
-    """Tests for attestation proof construction."""
-
-    async def test_hash_correctness(self) -> None:
-        """Input and output hashes are deterministic SHA-256."""
-        from src.models.pipeline import Verdict
-
-        state = _make_state()
-        verdict = Verdict(
-            decision=Decision.APPROVE,
-            composite_score=0.85,
-            score_breakdown={"static_clear": 1.0},
-            threshold_used=0.75,
-            timestamp=pytest.importorskip("datetime").datetime.now(
-                pytest.importorskip("datetime").timezone.utc,
-            ),
-            pipeline_duration_seconds=1.0,
-            findings_count=0,
-        )
-
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            attestation = await _build_attestation(state, verdict)
-
-        assert len(attestation.pipeline_input_hash) == 64
-        assert len(attestation.pipeline_output_hash) == 64
+class TestAttestationViaEngine:
+    """Tests for attestation proof generation via engine."""
 
     async def test_attestation_id_stamped(self) -> None:
         state = _make_state(
@@ -611,16 +571,31 @@ class TestAttestationProof:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="sha256:abc"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["attestation_id"] is not None
         assert state.verdict["attestation_id"].startswith("attest-")
+
+    async def test_engine_called_with_correct_action_id(self) -> None:
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(),
+            test_results=_make_test_results(passed=True),
+            static_findings=[],
+        )
+        config = _make_config()
+        intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
+
+        await run_decision(state, config, intel_db, engine)
+
+        engine.generate_proof.assert_awaited_once()
+        call_kwargs = engine.generate_proof.call_args.kwargs
+        assert call_kwargs["action_id"] == f"attest-{state.pr_id}-{state.commit_sha[:8]}"
+        assert call_kwargs["pr_id"] == state.pr_id
+        assert call_kwargs["repo"] == state.repo
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -639,12 +614,9 @@ class TestIntelDBIngestion:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         intel_db.ingest_pipeline_results.assert_awaited_once()
         call_kwargs = intel_db.ingest_pipeline_results.call_args.kwargs
@@ -662,12 +634,9 @@ class TestIntelDBIngestion:
         intel_db.ingest_pipeline_results = AsyncMock(
             side_effect=RuntimeError("DB down"),
         )
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         # Should still produce a valid verdict
         assert state.verdict is not None
@@ -686,16 +655,13 @@ class TestErrorHandling:
         state = _make_state()
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(
-                f"{_MODULE}._compute_s_static",
-                side_effect=RuntimeError("boom"),
-            ),
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
+        with patch(
+            f"{_MODULE}._compute_s_static",
+            side_effect=RuntimeError("boom"),
         ):
-            await run_decision(state, config, intel_db)
+            await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["decision"] == Decision.REJECT.value
@@ -705,16 +671,13 @@ class TestErrorHandling:
         state = _make_state()
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(
-                f"{_MODULE}._compute_s_static",
-                side_effect=RuntimeError("boom"),
-            ),
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
+        with patch(
+            f"{_MODULE}._compute_s_static",
+            side_effect=RuntimeError("boom"),
         ):
-            await run_decision(state, config, intel_db)
+            await run_decision(state, config, intel_db, engine)
 
         intel_db.ingest_pipeline_results.assert_awaited_once()
 
@@ -722,18 +685,33 @@ class TestErrorHandling:
         state = _make_state()
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(
-                f"{_MODULE}._compute_s_static",
-                side_effect=RuntimeError("boom"),
-            ),
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
+        with patch(
+            f"{_MODULE}._compute_s_static",
+            side_effect=RuntimeError("boom"),
         ):
-            await run_decision(state, config, intel_db)
+            await run_decision(state, config, intel_db, engine)
 
         assert state.current_stage == "decision_engine"
+
+    async def test_attestation_failure_degrades(self) -> None:
+        """If attestation engine fails during error recovery, state.attestation = None."""
+        state = _make_state()
+        config = _make_config()
+        intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
+        engine.generate_proof = AsyncMock(side_effect=RuntimeError("engine down"))
+
+        with patch(
+            f"{_MODULE}._compute_s_static",
+            side_effect=RuntimeError("boom"),
+        ):
+            await run_decision(state, config, intel_db, engine)
+
+        assert state.verdict is not None
+        assert state.verdict["decision"] == Decision.REJECT.value
+        assert state.attestation is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -758,12 +736,9 @@ class TestFindingsCount:
         )
         config = _make_config()
         intel_db = _make_intel_db()
+        engine = _make_attestation_engine()
 
-        with (
-            patch(f"{_MODULE}._get_image_digest", return_value="dev"),
-            patch(f"{_MODULE}._get_tee_platform_id", new_callable=AsyncMock, return_value="dev"),
-        ):
-            await run_decision(state, config, intel_db)
+        await run_decision(state, config, intel_db, engine)
 
         assert state.verdict is not None
         assert state.verdict["findings_count"] == 5  # 3 static + 2 AI

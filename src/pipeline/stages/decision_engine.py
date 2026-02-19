@@ -13,18 +13,16 @@ via EigenVerify.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import time
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from src.models.attestation import AttestationProof
 from src.models.enums import Decision, Severity
 from src.models.pipeline import Verdict
 
 if TYPE_CHECKING:
+    from src.attestation.engine import AttestationEngine
     from src.config import SaltaXConfig
     from src.intelligence.database import IntelligenceDB
     from src.pipeline.state import PipelineState
@@ -35,8 +33,6 @@ logger = logging.getLogger(__name__)
 
 _PENALTY_PER_CRITICAL_OR_HIGH = 0.25
 _DEGRADED_NEUTRAL = 0.5
-_TEE_METADATA_URL = "http://169.254.169.254/latest/attestation/platform-id"
-_TEE_TIMEOUT = 2.0  # seconds
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -46,6 +42,7 @@ async def run_decision(
     state: PipelineState,
     config: SaltaXConfig,
     intel_db: IntelligenceDB,
+    attestation_engine: AttestationEngine,
 ) -> None:
     """Aggregate stage outputs and produce a verdict with attestation.
 
@@ -63,10 +60,19 @@ async def run_decision(
                 "Short-circuit active — forcing REJECT for %s", state.pr_id,
             )
             verdict = _build_reject_verdict(state, config, t0)
-            attestation = await _build_attestation(state, verdict)
-            verdict.attestation_id = attestation.attestation_id
+            proof = await attestation_engine.generate_proof(
+                action_id=f"attest-{state.pr_id}-{state.commit_sha[:8]}",
+                pr_id=state.pr_id,
+                repo=state.repo,
+                inputs=_build_inputs(state),
+                outputs=_build_outputs(state, verdict),
+                ai_seed=state.ai_seed,
+                ai_output_hash=state.ai_output_hash,
+                ai_system_fingerprint=state.ai_system_fingerprint,
+            )
+            verdict.attestation_id = proof.attestation_id
             state.verdict = verdict.model_dump()
-            state.attestation = attestation.model_dump()
+            state.attestation = proof.model_dump()
             await _ingest_results(intel_db, state, verdict)
             return
 
@@ -127,11 +133,20 @@ async def run_decision(
             findings_count=findings_count,
         )
 
-        attestation = await _build_attestation(state, verdict)
-        verdict.attestation_id = attestation.attestation_id
+        proof = await attestation_engine.generate_proof(
+            action_id=f"attest-{state.pr_id}-{state.commit_sha[:8]}",
+            pr_id=state.pr_id,
+            repo=state.repo,
+            inputs=_build_inputs(state),
+            outputs=_build_outputs(state, verdict),
+            ai_seed=state.ai_seed,
+            ai_output_hash=state.ai_output_hash,
+            ai_system_fingerprint=state.ai_system_fingerprint,
+        )
+        verdict.attestation_id = proof.attestation_id
 
         state.verdict = verdict.model_dump()
-        state.attestation = attestation.model_dump()
+        state.attestation = proof.model_dump()
 
         await _ingest_results(intel_db, state, verdict)
 
@@ -148,10 +163,23 @@ async def run_decision(
     except Exception:
         logger.exception("Decision engine failed unexpectedly")
         verdict = _build_reject_verdict(state, config, t0)
-        attestation = await _build_attestation(state, verdict)
-        verdict.attestation_id = attestation.attestation_id
+        try:
+            proof = await attestation_engine.generate_proof(
+                action_id=f"attest-{state.pr_id}-{state.commit_sha[:8]}",
+                pr_id=state.pr_id,
+                repo=state.repo,
+                inputs=_build_inputs(state),
+                outputs=_build_outputs(state, verdict),
+                ai_seed=state.ai_seed,
+                ai_output_hash=state.ai_output_hash,
+                ai_system_fingerprint=state.ai_system_fingerprint,
+            )
+            verdict.attestation_id = proof.attestation_id
+            state.attestation = proof.model_dump()
+        except Exception:
+            logger.warning("Attestation also failed during error recovery", exc_info=True)
+            state.attestation = None
         state.verdict = verdict.model_dump()
-        state.attestation = attestation.model_dump()
         await _ingest_results(intel_db, state, verdict)
 
 
@@ -309,82 +337,23 @@ def _decide(
     return Decision.REJECT
 
 
-# ── Attestation ──────────────────────────────────────────────────────────────
+# ── Input/output builders ────────────────────────────────────────────────────
 
 
-async def _build_attestation(
-    state: PipelineState,
-    verdict: Verdict,
-) -> AttestationProof:
-    """Construct a cryptographic attestation proof binding inputs to outputs."""
-    attestation_id = f"attest-{state.pr_id}-{state.commit_sha[:8]}"
-
+def _build_inputs(state: PipelineState) -> dict[str, object]:
+    """Build the inputs dict for attestation hashing."""
     diff_hash = hashlib.sha256(state.diff.encode()).hexdigest()
-    input_data = json.dumps(
-        {"repo": state.repo, "commit_sha": state.commit_sha, "diff_hash": diff_hash},
-        sort_keys=True,
-    )
-    pipeline_input_hash = hashlib.sha256(input_data.encode()).hexdigest()
-
-    output_data = json.dumps(
-        {
-            "findings_count": verdict.findings_count,
-            "ai_analysis": state.ai_analysis,
-            "test_results": state.test_results,
-            "verdict": verdict.decision.value,
-        },
-        sort_keys=True,
-        default=str,
-    )
-    pipeline_output_hash = hashlib.sha256(output_data.encode()).hexdigest()
-
-    return AttestationProof(
-        attestation_id=attestation_id,
-        docker_image_digest=_get_image_digest(),
-        tee_platform_id=await _get_tee_platform_id(),
-        pipeline_input_hash=pipeline_input_hash,
-        pipeline_output_hash=pipeline_output_hash,
-        ai_seed=state.ai_seed,
-        ai_output_hash=state.ai_output_hash,
-        ai_system_fingerprint=state.ai_system_fingerprint,
-        signature="",  # Populated by attestation engine post-creation
-        timestamp=datetime.now(UTC),
-    )
+    return {"repo": state.repo, "commit_sha": state.commit_sha, "diff_hash": diff_hash}
 
 
-def _get_image_digest() -> str:
-    """Read the Docker image digest from ``/proc/self/cgroup``.
-
-    Returns ``"dev"`` when not running inside a container.
-    """
-    try:
-        cgroup = Path("/proc/self/cgroup").read_text()
-        for line in cgroup.splitlines():
-            parts = line.strip().split("/")
-            for part in reversed(parts):
-                if len(part) >= 64 and all(c in "0123456789abcdef" for c in part):
-                    return f"sha256:{part}"
-    except OSError:
-        pass
-    return "dev"
-
-
-async def _get_tee_platform_id() -> str:
-    """Read TEE platform ID from the EigenCompute metadata API.
-
-    Returns ``"dev"`` when the metadata endpoint is unreachable (local dev).
-    Uses a 2-second timeout to avoid blocking the pipeline.
-    """
-    try:
-        import httpx  # noqa: PLC0415
-
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(_TEE_METADATA_URL, timeout=_TEE_TIMEOUT)
-            if resp.status_code == 200:
-                return resp.text.strip() or "dev"
-    except Exception:
-        pass
-    return "dev"
+def _build_outputs(state: PipelineState, verdict: Verdict) -> dict[str, object]:
+    """Build the outputs dict for attestation hashing."""
+    return {
+        "findings_count": verdict.findings_count,
+        "ai_analysis": state.ai_analysis,
+        "test_results": state.test_results,
+        "verdict": verdict.decision.value,
+    }
 
 
 # ── Verdict factories ────────────────────────────────────────────────────────
@@ -440,17 +409,6 @@ async def _ingest_results(
             verdict=verdict.model_dump(),
             author=state.pr_author,
         )
-
-        # Persist attestation so GET /attestation/{id} returns data (Fix #1)
-        if state.attestation:
-            await intel_db.store_attestation(
-                attestation_id=str(state.attestation.get("attestation_id", "")),
-                pr_id=state.pr_id,
-                repo=state.repo,
-                pipeline_input_hash=str(state.attestation.get("pipeline_input_hash", "")),
-                pipeline_output_hash=str(state.attestation.get("pipeline_output_hash", "")),
-                signature=str(state.attestation.get("signature", "")),
-            )
     except Exception:
         logger.warning(
             "Failed to ingest pipeline results into intelligence DB", exc_info=True,

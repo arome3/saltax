@@ -57,6 +57,10 @@ def _make_intel_db() -> AsyncMock:
     return db
 
 
+def _make_attestation_engine() -> AsyncMock:
+    return AsyncMock()
+
+
 def _finding(severity: str) -> dict[str, object]:
     return {"severity": severity, "rule_id": "test-rule", "message": "x"}
 
@@ -106,6 +110,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         call_order: list[str] = []
 
@@ -120,7 +125,7 @@ class TestRunPipeline:
             m_test.side_effect = lambda *a, **kw: call_order.append("test_executor")
             m_dec.side_effect = lambda *a, **kw: call_order.append("decision_engine")
 
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert call_order == ["static_scanner", "ai_analyzer", "test_executor", "decision_engine"]
         assert result.current_stage == "completed"
@@ -132,13 +137,14 @@ class TestRunPipeline:
         m_scan.assert_awaited_once_with(state, config, intel_db)
         m_ai.assert_awaited_once_with(state, config, env, intel_db)
         m_test.assert_awaited_once_with(state, config)
-        m_dec.assert_awaited_once_with(state, config, intel_db)
+        m_dec.assert_awaited_once_with(state, config, intel_db, attest_engine)
 
     async def test_short_circuit_skips_ai_and_tests(self) -> None:
         state = _make_state()
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         def _inject_critical(st: PipelineState, *_a: object, **_kw: object) -> None:
             st.static_findings = [_finding("CRITICAL")]
@@ -151,7 +157,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock) as m_dec,
         ):
             m_scan.side_effect = _inject_critical
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         m_ai.assert_not_awaited()
         m_test.assert_not_awaited()
@@ -165,6 +171,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         scan = patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock)
         with (
@@ -174,7 +181,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock) as m_dec,
         ):
             m_scan.side_effect = RuntimeError("boom")
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         m_ai.assert_not_awaited()
         m_test.assert_not_awaited()
@@ -187,6 +194,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         ai = patch(f"{_MODULE}.run_ai_analysis", new_callable=AsyncMock)
         with (
@@ -196,7 +204,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock) as m_dec,
         ):
             m_ai.side_effect = ValueError("ai fail")
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         m_test.assert_not_awaited()
         m_dec.assert_awaited_once()
@@ -209,6 +217,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         observed_stages: list[str] = []
 
@@ -221,7 +230,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_tests", new_callable=AsyncMock, side_effect=_capture_stage),
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock, side_effect=_capture_stage),
         ):
-            await run_pipeline(state, config, env, intel_db)
+            await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert observed_stages == [
             "static_scanner",
@@ -236,6 +245,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         # Patch _log_stage_timing to verify it's called, then call the real
         # implementation with an artificially high elapsed value.
@@ -259,7 +269,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}._log_stage_timing", side_effect=_spy),
             caplog.at_level(logging.WARNING, logger="src.pipeline.runner"),
         ):
-            await run_pipeline(state, config, env, intel_db)
+            await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert any("exceeded budget" in r.message for r in caplog.records)
         assert len(logged_calls) == 4
@@ -270,6 +280,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         async def _stall(*_a: object, **_kw: object) -> None:
             await asyncio.sleep(700)
@@ -283,7 +294,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_tests", new_callable=AsyncMock),
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock) as m_dec,
         ):
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert result.current_stage == "timed_out"
         assert result.error is not None
@@ -297,6 +308,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         scan = patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock)
         dec = patch(f"{_MODULE}.run_decision", new_callable=AsyncMock)
@@ -308,7 +320,7 @@ class TestRunPipeline:
         ):
             m_scan.side_effect = RuntimeError("scan boom")
             m_dec.side_effect = RuntimeError("decision boom")
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         # Original error is preserved (not overwritten)
         assert "static_scanner" in result.error
@@ -319,6 +331,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         with (
             patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock),
@@ -326,7 +339,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_tests", new_callable=AsyncMock),
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock),
         ):
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert result.pipeline_start_time != ""
         # Should be a valid ISO-8601 timestamp
@@ -338,6 +351,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         with (
             patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock),
@@ -345,7 +359,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_tests", new_callable=AsyncMock),
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock),
         ):
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         assert len(result.trace_id) == 32
         # Must be valid hex
@@ -357,6 +371,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         async def _stall(*_a: object, **_kw: object) -> None:
             await asyncio.sleep(700)
@@ -369,7 +384,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_tests", new_callable=AsyncMock),
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock) as m_dec,
         ):
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         # Per-stage timeout message (not global "Pipeline timed out")
         assert result.error is not None
@@ -383,6 +398,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         with (
             patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock),
@@ -391,7 +407,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock),
             patch(f"{_MODULE}._emit_metric") as m_metric,
         ):
-            await run_pipeline(state, config, env, intel_db)
+            await run_pipeline(state, config, env, intel_db, attest_engine)
 
         metric_names = [call.args[0] for call in m_metric.call_args_list]
         # 4 stage durations
@@ -407,6 +423,7 @@ class TestRunPipeline:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
         with (
             patch(f"{_MODULE}.run_static_scan", new_callable=AsyncMock),
@@ -415,7 +432,7 @@ class TestRunPipeline:
             patch(f"{_MODULE}.run_decision", new_callable=AsyncMock),
             patch(f"{_MODULE}._emit_metric") as m_metric,
         ):
-            result = await run_pipeline(state, config, env, intel_db)
+            result = await run_pipeline(state, config, env, intel_db, attest_engine)
 
         for call in m_metric.call_args_list:
             assert "trace_id" in call.kwargs, f"Missing trace_id in {call}"
@@ -477,8 +494,9 @@ class TestPipelineClass:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
-        pipeline = Pipeline(config, env, intel_db)
+        pipeline = Pipeline(config, env, intel_db, attest_engine)
 
         pr_data: dict[str, Any] = {
             "pr_id": "owner/repo#1",
@@ -504,8 +522,9 @@ class TestPipelineClass:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
-        pipeline = Pipeline(config, env, intel_db)
+        pipeline = Pipeline(config, env, intel_db, attest_engine)
 
         pr_data: dict[str, Any] = {
             "pr_id": "owner/repo#1",
@@ -536,16 +555,18 @@ class TestPipelineClass:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
-        pipeline = build_pipeline(config, env, intel_db)
+        pipeline = build_pipeline(config, env, intel_db, attest_engine)
         assert isinstance(pipeline, Pipeline)
 
     async def test_run_raises_on_missing_required_fields(self) -> None:
         config = _make_config()
         env = _make_env()
         intel_db = _make_intel_db()
+        attest_engine = _make_attestation_engine()
 
-        pipeline = Pipeline(config, env, intel_db)
+        pipeline = Pipeline(config, env, intel_db, attest_engine)
 
         # Missing required fields like commit_sha, diff, etc.
         incomplete: dict[str, Any] = {"pr_id": "owner/repo#1"}

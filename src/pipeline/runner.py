@@ -16,6 +16,7 @@ from src.pipeline.state import PipelineState
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from src.attestation.engine import AttestationEngine
     from src.config import EnvConfig, SaltaXConfig
     from src.intelligence.database import IntelligenceDB
 
@@ -89,6 +90,7 @@ async def run_pipeline(
     config: SaltaXConfig,
     env: EnvConfig,
     intel_db: IntelligenceDB,
+    attestation_engine: AttestationEngine,
 ) -> PipelineState:
     """Execute all pipeline stages in sequence and return the mutated *state*.
 
@@ -157,7 +159,7 @@ async def run_pipeline(
     await _execute_stage(
         "decision_engine",
         run_decision,
-        (state, config, intel_db),
+        (state, config, intel_db, attestation_engine),
         state,
         5,
         30,
@@ -239,7 +241,8 @@ def _exc_summary() -> str:
 class Pipeline:
     """Executes the multi-stage analysis pipeline on incoming PRs.
 
-    Stores config/env/intel_db and delegates to :func:`run_pipeline`.
+    Stores config/env/intel_db/attestation_engine and delegates to
+    :func:`run_pipeline`.
     """
 
     def __init__(
@@ -247,22 +250,28 @@ class Pipeline:
         config: SaltaXConfig,
         env: EnvConfig,
         intel_db: IntelligenceDB,
+        attestation_engine: AttestationEngine,
     ) -> None:
         self._config = config
         self._env = env
         self._intel_db = intel_db
+        self._attestation_engine = attestation_engine
 
     async def run(self, pr_data: dict[str, Any]) -> PipelineState:
         """Build a :class:`PipelineState` from *pr_data* and execute the pipeline."""
         filtered = {k: v for k, v in pr_data.items() if k in _PIPELINE_STATE_FIELDS}
         state = PipelineState(**filtered)
-        return await run_pipeline(state, self._config, self._env, self._intel_db)
+        return await run_pipeline(
+            state, self._config, self._env, self._intel_db,
+            self._attestation_engine,
+        )
 
 
 def build_pipeline(
     config: SaltaXConfig,
     env: EnvConfig,
     intel_db: IntelligenceDB,
+    attestation_engine: AttestationEngine,
 ) -> Pipeline:
     """Construct a fully-wired pipeline from configuration."""
-    return Pipeline(config, env, intel_db)
+    return Pipeline(config, env, intel_db, attestation_engine)

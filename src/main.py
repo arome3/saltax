@@ -343,7 +343,12 @@ async def bootstrap() -> None:  # noqa: C901
     # ── Phase 4: Build Connections ───────────────────────────────────────
     try:
         logger.info("Phase 4: Build Connections")
-        pipeline = build_pipeline(config, env, intel_db)
+        from src.attestation.engine import AttestationEngine  # noqa: PLC0415
+        from src.attestation.store import AttestationStore  # noqa: PLC0415
+
+        attestation_store = AttestationStore(intel_db)
+        attestation_engine = AttestationEngine(wallet=wallet, store=attestation_store)
+        pipeline = build_pipeline(config, env, intel_db, attestation_engine)
         github_client = GitHubClient(
             app_id=env.github_app_id,
             private_key=env.github_app_private_key,

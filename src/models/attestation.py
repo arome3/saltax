@@ -30,7 +30,9 @@ class AttestationProof(BaseModel):
     ai_output_hash: str | None = None
     ai_system_fingerprint: str | None = None
     signature: str
+    signer_address: str = ""
     timestamp: datetime
+    previous_attestation_id: str | None = None
 
 
 # ── Signed verdict ──────────────────────────────────────────────────────────
