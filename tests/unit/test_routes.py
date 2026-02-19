@@ -116,6 +116,14 @@ def _make_app() -> FastAPI:
     tx_store.check_and_record = AsyncMock(return_value=False)
     app.state.tx_store = tx_store
 
+    # Reputation manager — returns empty metrics by default
+    from src.models.identity import ReputationMetrics
+
+    reputation_mgr = AsyncMock()
+    reputation_mgr.get_metrics = AsyncMock(return_value=ReputationMetrics())
+    reputation_mgr.get_on_chain_reputation = AsyncMock(return_value=None)
+    app.state.reputation_mgr = reputation_mgr
+
     return app
 
 

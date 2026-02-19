@@ -33,7 +33,9 @@ from src.api.middleware.tx_store import TxHashStore
 from src.api.middleware.x402 import PaymentVerifier
 from src.config import EnvConfig, SaltaXConfig, validate_config
 from src.github.client import GitHubClient
+from src.identity.bridge_client import IdentityBridgeClient
 from src.identity.registration import IdentityRegistrar
+from src.identity.reputation import ReputationManager
 from src.intelligence.database import IntelligenceDB
 from src.intelligence.sealing import KMSSealManager
 from src.pipeline.runner import build_pipeline
@@ -82,21 +84,25 @@ class TSProxyManager:
         max_retries: int = 3,
         check_interval: float = 5.0,
         terminate_timeout: float = 10.0,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self._max_retries = max_retries
         self._check_interval = check_interval
         self._terminate_timeout = terminate_timeout
+        self._extra_env = extra_env or {}
         self._process: subprocess.Popen[bytes] | None = None
         self._monitor_task: asyncio.Task[None] | None = None
         self._retries = 0
         self._stopped = False
 
     def _start_process(self) -> subprocess.Popen[bytes]:
+        env = {**os.environ, **self._extra_env} if self._extra_env else None
         return subprocess.Popen(
             ["node", "dist/index.js"],
             cwd="github-proxy",
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
         )
 
     def start(self) -> None:
@@ -191,6 +197,7 @@ async def _graceful_shutdown(
     intel_db: IntelligenceDB,
     kms: KMSSealManager,
     wallet: WalletManager,
+    identity: IdentityRegistrar,
     ts_proxy: TSProxyManager,
     timeout: float = _SHUTDOWN_TIMEOUT,
 ) -> None:
@@ -219,6 +226,13 @@ async def _graceful_shutdown(
                 await wallet.seal()
             except Exception:
                 logger.exception("Error sealing wallet key")
+
+            # Close identity (and its bridge httpx client) before stopping
+            # the TS proxy — the client talks to the proxy.
+            try:
+                await identity.close()
+            except Exception:
+                logger.exception("Error closing identity registrar")
 
             try:
                 await ts_proxy.stop()
@@ -275,10 +289,18 @@ async def bootstrap() -> None:  # noqa: C901
         wallet = WalletManager(kms=kms, rpc_url=env.rpc_url, chain_id=env.chain_id)
         resources.append(("wallet", wallet))
         await wallet.initialize()
-        identity = IdentityRegistrar(wallet, env.identity_rpc_url, env.identity_chain_id)
+        bridge_client = IdentityBridgeClient(env.identity_bridge_url)
+        resources.append(("bridge_client", bridge_client))
+        identity = IdentityRegistrar(
+            wallet,
+            bridge_client,
+            env.identity_chain_id,
+            agent_name=config.agent.name,
+            agent_description=config.agent.description,
+        )
         resources.append(("identity", identity))
-        await identity.register_or_recover()
-        logger.info("Phase 2 complete — agent_id=%s wallet=%s", identity.agent_id, wallet.address)
+        # register_or_recover() deferred to Phase 3 (needs intel_db for cache)
+        logger.info("Phase 2 complete — wallet=%s", wallet.address)
     except Exception:
         logger.exception("Phase 2 failed")
         await _teardown(resources)
@@ -291,7 +313,15 @@ async def bootstrap() -> None:  # noqa: C901
         await intel_db.initialize()
         resources.append(("intel_db", intel_db))
         pattern_count = await intel_db.count_patterns()
-        logger.info("Phase 3 complete — %d patterns loaded", pattern_count)
+
+        # Wire intel_db to identity for cache recovery, then register
+        identity.intel_db = intel_db
+        await identity.register_or_recover()
+        logger.info(
+            "Phase 3 complete — %d patterns loaded, agent_id=%s",
+            pattern_count,
+            identity.agent_id,
+        )
     except Exception:
         logger.exception("Phase 3 failed")
         await _teardown(resources)
@@ -328,6 +358,11 @@ async def bootstrap() -> None:  # noqa: C901
         tx_store = TxHashStore(db_path="data/tx_hashes.db")
         await tx_store.initialize()
         resources.append(("tx_store", tx_store))
+
+        reputation_mgr = ReputationManager(
+            bridge_client, intel_db, identity.agent_id or "",
+        )
+        resources.append(("reputation_mgr", reputation_mgr))
         logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
@@ -351,11 +386,26 @@ async def bootstrap() -> None:  # noqa: C901
             treasury_mgr=treasury_mgr,
             payment_verifier=payment_verifier,
             tx_store=tx_store,
+            reputation_mgr=reputation_mgr,
         )
 
         scheduler_task = asyncio.create_task(scheduler.run())
 
-        ts_proxy = TSProxyManager()
+        # Build identity env for the TS proxy subprocess
+        identity_env: dict[str, str] = {
+            "IDENTITY_RPC_URL": env.identity_rpc_url,
+            "IDENTITY_CHAIN_ID": str(env.identity_chain_id),
+        }
+        if env.pinata_jwt:
+            identity_env["PINATA_JWT"] = env.pinata_jwt
+        # Pass wallet private key for on-chain tx signing (both in same TEE)
+        if wallet.address is not None:
+            try:
+                identity_env["IDENTITY_PRIVATE_KEY"] = wallet._require_account().key.hex()
+            except RuntimeError:
+                logger.warning("Wallet not initialized, skipping IDENTITY_PRIVATE_KEY")
+
+        ts_proxy = TSProxyManager(extra_env=identity_env)
         ts_proxy.start()
         resources.append(("ts_proxy", ts_proxy))
 
@@ -398,6 +448,7 @@ async def bootstrap() -> None:  # noqa: C901
         intel_db=intel_db,
         kms=kms,
         wallet=wallet,
+        identity=identity,
         ts_proxy=ts_proxy,
     )
 

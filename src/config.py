@@ -307,6 +307,8 @@ class EnvConfig(BaseSettings):
     chain_id: int = 8453
     identity_rpc_url: str = "https://ethereum-sepolia-rpc.publicnode.com"
     identity_chain_id: int = 11155111
+    pinata_jwt: str = ""
+    identity_bridge_url: str = "http://127.0.0.1:8081"
     log_level: str = "INFO"
     host: str = "0.0.0.0"
     port: int = 8080

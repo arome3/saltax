@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.identity.registration import IdentityRegistrar
+    from src.identity.reputation import ReputationManager
     from src.intelligence.database import IntelligenceDB
     from src.pipeline.runner import Pipeline
     from src.treasury.manager import TreasuryManager
@@ -77,3 +78,8 @@ def get_payment_verifier(request: Request) -> PaymentVerifier:
 def get_tx_store(request: Request) -> TxHashStore:
     """Return the durable transaction hash store."""
     return request.app.state.tx_store  # type: ignore[no-any-return]
+
+
+def get_reputation_manager(request: Request) -> ReputationManager:
+    """Return the reputation manager."""
+    return request.app.state.reputation_mgr  # type: ignore[no-any-return]

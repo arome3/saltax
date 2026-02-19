@@ -6,6 +6,7 @@
  */
 
 import express, { type Request, type Response } from "express";
+import { identityRouter } from "./identity-bridge.js";
 
 const PORT = parseInt(process.env["PORT"] ?? "8081", 10);
 const FORWARD_URL =
@@ -13,6 +14,10 @@ const FORWARD_URL =
 const FORWARD_TIMEOUT_MS = 9000; // Under GitHub's 10s delivery timeout
 
 const app = express();
+
+// Identity routes need JSON body parsing — mount BEFORE the raw body middleware.
+app.use("/identity", express.json({ limit: "1mb" }));
+app.use("/identity", identityRouter);
 
 // Preserve the raw body as a Buffer — required for downstream HMAC validation.
 app.use(express.raw({ type: "application/json", limit: "10mb" }));

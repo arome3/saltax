@@ -114,14 +114,14 @@ class TestSchemaCreation:
         assert count == 0
 
     async def test_schema_version_row(self, intel_db: IntelligenceDB) -> None:
-        """schema_version table should have exactly one row with version 1."""
+        """schema_version table should have exactly one row with current version."""
         db = intel_db._require_db()
         async with db.execute(
             "SELECT version FROM schema_version WHERE id = 1",
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 1
+        assert row[0] == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

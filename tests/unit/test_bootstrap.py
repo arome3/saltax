@@ -462,6 +462,9 @@ class TestGracefulShutdown:
 
         ts_proxy.stop = track_ts_stop
 
+        identity = MagicMock()
+        identity.close = AsyncMock()
+
         await _graceful_shutdown(
             server=server,
             server_task=server_task,
@@ -470,6 +473,7 @@ class TestGracefulShutdown:
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
+            identity=identity,
             ts_proxy=ts_proxy,
         )
 
@@ -511,6 +515,9 @@ class TestGracefulShutdown:
 
         ts_proxy.stop = track_ts_stop
 
+        identity = MagicMock()
+        identity.close = AsyncMock()
+
         await _graceful_shutdown(
             server=server,
             server_task=server_task,
@@ -519,6 +526,7 @@ class TestGracefulShutdown:
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
+            identity=identity,
             ts_proxy=ts_proxy,
         )
 
@@ -544,6 +552,9 @@ class TestGracefulShutdown:
         wallet.seal = AsyncMock()
         ts_proxy = MagicMock()
 
+        identity = MagicMock()
+        identity.close = AsyncMock()
+
         # Should complete quickly (not hang) due to the short timeout
         await _graceful_shutdown(
             server=server,
@@ -553,6 +564,7 @@ class TestGracefulShutdown:
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
+            identity=identity,
             ts_proxy=ts_proxy,
             timeout=0.05,
         )
@@ -597,6 +609,9 @@ class TestGracefulShutdown:
 
         ts_proxy.stop = noop_ts_stop
 
+        identity = MagicMock()
+        identity.close = AsyncMock()
+
         await _graceful_shutdown(
             server=server,
             server_task=server_task,
@@ -605,6 +620,7 @@ class TestGracefulShutdown:
             intel_db=intel_db,
             kms=kms,
             wallet=wallet,
+            identity=identity,
             ts_proxy=ts_proxy,
         )
 

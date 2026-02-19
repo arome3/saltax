@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from pydantic import ValidationError
@@ -30,7 +30,7 @@ from src.pipeline.state import PipelineState
 # Factory helpers — construct valid instances with minimal boilerplate
 # ---------------------------------------------------------------------------
 
-_NOW = datetime(2025, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2025, 6, 1, 12, 0, 0, tzinfo=UTC)
 
 
 def make_finding(**overrides: object) -> Finding:
@@ -343,7 +343,7 @@ class TestRoundTrip:
     def test_reputation_metrics_round_trip(self) -> None:
         rm = ReputationMetrics(total_prs_reviewed=100, total_prs_approved=80)
         # Exclude computed_field properties — they're derived, not input fields
-        computed = {"approval_rate", "dispute_accuracy"}
+        computed = {"approval_rate"}
         data = rm.model_dump(exclude=computed)
         rm2 = ReputationMetrics(**data)
         assert rm2.total_prs_reviewed == 100
@@ -359,10 +359,9 @@ class TestRoundTrip:
             description="Sovereign Code Organism",
             registered_at=_NOW,
         )
-        data = ai.model_dump(exclude={"reputation": {"approval_rate", "dispute_accuracy"}})
+        data = ai.model_dump(exclude={"approval_rate"})
         ai2 = AgentIdentity(**data)
         assert ai2.agent_id == ai.agent_id
-        assert ai2.reputation.approval_rate == ai.reputation.approval_rate
 
     def test_attestation_proof_round_trip(self) -> None:
         ap = AttestationProof(
@@ -779,25 +778,13 @@ class TestReputationMetrics:
         rm = ReputationMetrics(total_prs_reviewed=100, total_prs_approved=75)
         assert rm.approval_rate == 0.75
 
-    def test_dispute_accuracy_zero_disputes(self) -> None:
+    def test_vulnerabilities_caught_default(self) -> None:
         rm = ReputationMetrics()
-        assert rm.dispute_accuracy == 0.0
+        assert rm.vulnerabilities_caught == 0
 
-    def test_dispute_accuracy_computed(self) -> None:
-        rm = ReputationMetrics(disputes_filed=10, disputes_upheld=8)
-        assert rm.dispute_accuracy == pytest.approx(0.8)
-
-    def test_agent_identity_default_reputation(self) -> None:
-        ai = AgentIdentity(
-            agent_id="a-1",
-            chain_id=1,
-            wallet_address="0x0",
-            name="Test",
-            description="Test agent",
-            registered_at=_NOW,
-        )
-        assert ai.reputation.total_prs_reviewed == 0
-        assert ai.reputation.approval_rate == 0.0
+    def test_uptime_seconds_default(self) -> None:
+        rm = ReputationMetrics()
+        assert rm.uptime_seconds == 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

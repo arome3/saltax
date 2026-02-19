@@ -23,6 +23,7 @@ import aiosqlite
 
 from src.intelligence.pattern_extractor import extract_patterns
 from src.intelligence.similarity import _extract_code_tokens, cosine_similarity
+from src.models.identity import AgentIdentity
 
 if TYPE_CHECKING:
     from src.intelligence.sealing import KMSSealManager
@@ -35,7 +36,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 1
+_CURRENT_SCHEMA_VERSION = 2
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -144,6 +145,16 @@ CREATE TABLE IF NOT EXISTS vision_documents (
     content      TEXT NOT NULL,
     embedding    BLOB,
     updated_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_identity_cache (
+    wallet_address  TEXT PRIMARY KEY,
+    agent_id        TEXT NOT NULL,
+    chain_id        INTEGER NOT NULL,
+    name            TEXT NOT NULL DEFAULT '',
+    description     TEXT NOT NULL DEFAULT '',
+    registered_at   TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_vp_signature ON vulnerability_patterns(pattern_signature);
@@ -299,7 +310,18 @@ class IntelligenceDB:
         else:
             current = row[0]
             if current < _CURRENT_SCHEMA_VERSION:
-                # Future migration blocks go here
+                if current < 2:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS agent_identity_cache ("
+                        "    wallet_address  TEXT PRIMARY KEY,"
+                        "    agent_id        TEXT NOT NULL,"
+                        "    chain_id        INTEGER NOT NULL,"
+                        "    name            TEXT NOT NULL DEFAULT '',"
+                        "    description     TEXT NOT NULL DEFAULT '',"
+                        "    registered_at   TEXT NOT NULL,"
+                        "    updated_at      TEXT NOT NULL"
+                        ");"
+                    )
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
                     (_CURRENT_SCHEMA_VERSION, now),
@@ -906,6 +928,59 @@ class IntelligenceDB:
                 (doc_id, repo, content, embedding, now),
             )
             await db.commit()
+
+    # ── Identity cache ────────────────────────────────────────────────────
+
+    async def cache_identity(self, identity: AgentIdentity) -> None:
+        """Cache an agent identity for cross-boot recovery.
+
+        Uses ``INSERT OR REPLACE`` so repeated calls for the same wallet
+        address update rather than conflict.  Requires ``_write_lock``.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT OR REPLACE INTO agent_identity_cache
+                    (wallet_address, agent_id, chain_id, name,
+                     description, registered_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    identity.wallet_address,
+                    identity.agent_id,
+                    identity.chain_id,
+                    identity.name,
+                    identity.description,
+                    identity.registered_at.isoformat(),
+                    now,
+                ),
+            )
+            await db.commit()
+
+    async def get_cached_identity(
+        self, wallet_address: str,
+    ) -> AgentIdentity | None:
+        """Retrieve a cached identity by wallet address.  Read-only."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT wallet_address, agent_id, chain_id, name, "
+            "description, registered_at FROM agent_identity_cache "
+            "WHERE wallet_address = ?",
+            (wallet_address,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return AgentIdentity(
+                agent_id=row[1],
+                chain_id=row[2],
+                wallet_address=row[0],
+                name=row[3],
+                description=row[4],
+                registered_at=datetime.fromisoformat(row[5]),
+            )
 
     # ── Embeddings ───────────────────────────────────────────────────────
 
