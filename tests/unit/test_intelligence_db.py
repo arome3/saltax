@@ -85,12 +85,12 @@ class TestSchemaCreation:
     """Verify DB schema is created correctly."""
 
     async def test_all_tables_exist(self, intel_db: IntelligenceDB) -> None:
-        """All 10 expected tables should be present."""
+        """All 11 expected tables should be present."""
         expected = {
             "schema_version", "vulnerability_patterns", "contributor_profiles",
             "codebase_knowledge", "pipeline_history", "attestation_store",
             "active_bounties", "verification_windows", "pr_embeddings",
-            "vision_documents",
+            "vision_documents", "ranking_updates",
         }
         db = intel_db._require_db()
         async with db.execute(
@@ -121,7 +121,7 @@ class TestSchemaCreation:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 9
+        assert row[0] == 10
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -657,6 +657,97 @@ class TestEmbeddings:
             emb_orth, "owner/repo", threshold=0.5,
         )
         assert len(results) == 0
+
+    async def test_backfill_null_to_value(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """GAP 4: backfill_embedding_issue_number updates NULL→42."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_embedding(
+            pr_id="owner/repo#1",
+            repo="owner/repo",
+            pr_number=1,
+            commit_sha="abc123",
+            embedding_blob=emb,
+        )
+        updated = await intel_db.backfill_embedding_issue_number(
+            pr_id="owner/repo#1", repo="owner/repo", issue_number=42,
+        )
+        assert updated == 1
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 42
+
+    async def test_backfill_skips_non_null(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """GAP 4: backfill does not overwrite already-set issue_number."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_embedding(
+            pr_id="owner/repo#1",
+            repo="owner/repo",
+            pr_number=1,
+            commit_sha="abc123",
+            embedding_blob=emb,
+            issue_number=99,
+        )
+        updated = await intel_db.backfill_embedding_issue_number(
+            pr_id="owner/repo#1", repo="owner/repo", issue_number=42,
+        )
+        assert updated == 0
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 99  # unchanged
+
+    async def test_backfill_no_match_returns_zero(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """GAP 4: no matching rows → returns 0."""
+        updated = await intel_db.backfill_embedding_issue_number(
+            pr_id="nonexistent", repo="owner/repo", issue_number=42,
+        )
+        assert updated == 0
+
+    async def test_on_conflict_updates_issue_number(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """GAP 1: Re-storing an embedding with issue_number updates NULL→42."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        # First store — no issue_number (defaults to NULL)
+        await intel_db.store_embedding(
+            pr_id="owner/repo#1",
+            repo="owner/repo",
+            pr_number=1,
+            commit_sha="abc123",
+            embedding_blob=emb,
+        )
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] is None
+
+        # Second store — same pr_id + commit_sha → same deterministic id
+        await intel_db.store_embedding(
+            pr_id="owner/repo#1",
+            repo="owner/repo",
+            pr_number=1,
+            commit_sha="abc123",
+            embedding_blob=emb,
+            issue_number=42,
+        )
+        async with db.execute(
+            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 42
 
     async def test_mismatched_embedding_sizes_skipped(
         self, intel_db: IntelligenceDB,

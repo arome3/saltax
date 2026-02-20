@@ -221,6 +221,7 @@ class RankingConfig(BaseModel):
     enabled: bool = True
     label_superseded: str = "superseded"
     label_recommended: str = "saltax-recommended"
+    update_interval_seconds: int = Field(default=3600, gt=0)
 
 
 class VisionConfig(BaseModel):
@@ -412,6 +413,14 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             "verification.self_modification_window_hours "
             f"({cfg.verification.self_modification_window_hours}) must be greater than "
             f"verification.standard_window_hours ({cfg.verification.standard_window_hours})"
+        )
+
+    # 8. Ranking requires dedup — ranking depends on pr_embeddings populated by dedup
+    if cfg.triage.enabled and cfg.triage.ranking.enabled and not cfg.triage.dedup.enabled:
+        errors.append(
+            "triage.ranking.enabled is True but triage.dedup.enabled is False — "
+            "ranking requires dedup to store PR embeddings; "
+            "enable dedup or disable ranking"
         )
 
     return errors

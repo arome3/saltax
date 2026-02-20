@@ -59,23 +59,56 @@ def format_pipeline_result(verdict: Verdict, findings: list[Finding]) -> str:
     return "\n".join(lines)
 
 
-def format_ranking_update(rankings: list[dict[str, object]]) -> str:
-    """Format a competitive PR ranking table as Markdown."""
-    lines: list[str] = [
+def format_ranking_update(
+    rankings: list[dict[str, object]],
+    *,
+    repo: str = "",
+    issue_number: int = 0,
+) -> str:
+    """Format a competitive PR ranking table as Markdown.
+
+    Each entry is expected to contain ``pr_number``, ``pr_author``,
+    ``composite_score``, and ``verdict`` (JSON string with a ``decision`` key).
+    The top-ranked PR is marked as ``(recommended)``.
+
+    When *repo* and *issue_number* are provided, an invisible HTML marker
+    is prepended to enable comment deduplication (update-or-create pattern).
+    """
+    lines: list[str] = []
+    if repo and issue_number:
+        lines.append(f"<!-- saltax-ranking:{repo}:{issue_number} -->")
+    lines.extend([
         "## SaltaX PR Rankings",
         "",
-        "| Rank | PR | Author | Score |",
-        "|------|----|--------|-------|",
-    ]
+        "| Rank | PR | Author | Score | Status |",
+        "|------|----|--------|-------|--------|",
+    ])
 
     for i, entry in enumerate(rankings, start=1):
-        pr_id = entry.get("pr_id", "?")
-        author = entry.get("author", "?")
-        score = entry.get("score", 0)
-        score_str = f"{score:.2f}" if isinstance(score, float) else str(score)
+        pr_number = entry.get("pr_number", "?")
+        author = entry.get("pr_author", "?")
+        score = entry.get("composite_score", 0)
+        score_str = f"{score:.2f}" if isinstance(score, int | float) else str(score)
+
+        # Parse verdict JSON to extract decision string
+        verdict_raw = entry.get("verdict", "")
+        status = "—"
+        if isinstance(verdict_raw, str) and verdict_raw:
+            try:
+                import json  # noqa: PLC0415
+                verdict_data = json.loads(verdict_raw)
+                status = str(verdict_data.get("decision", "—"))
+            except (json.JSONDecodeError, TypeError):
+                status = "—"
+
+        pr_label = f"#{pr_number}"
+        if i == 1:
+            pr_label += " (recommended)"
+
         lines.append(
-            f"| {i} | {_escape_cell(str(pr_id))} "
-            f"| {_escape_cell(str(author))} | {score_str} |"
+            f"| {i} | {_escape_cell(str(pr_label))} "
+            f"| {_escape_cell(str(author))} | {score_str} "
+            f"| {_escape_cell(status)} |"
         )
 
     return "\n".join(lines)

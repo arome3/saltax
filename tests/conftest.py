@@ -96,6 +96,7 @@ VALID_YAML = textwrap.dedent("""\
         enabled: true
         label_superseded: "superseded"
         label_recommended: "saltax-recommended"
+        update_interval_seconds: 3600
       vision:
         enabled: false
         alignment_weight: 0.15

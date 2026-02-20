@@ -107,6 +107,51 @@ async def handle_pr_event(
             "action": action,
         }
 
+        # ── Triage: extract target issue ──────────────────────────
+        target_issue_number = None
+        if config.triage.enabled and config.triage.ranking.enabled:
+            try:
+                from src.triage.issue_linker import (  # noqa: PLC0415
+                    extract_target_issue,
+                )
+
+                target_issue_number = extract_target_issue(
+                    title=pr_data.get("title", ""),
+                    body=pr_data.get("body"),
+                    head_branch=pr_data.get("head_branch", ""),
+                )
+                if target_issue_number is not None:
+                    state_dict["target_issue_number"] = target_issue_number
+                    # Backfill issue_number on existing embeddings that
+                    # were stored before the fix (NULL → actual value)
+                    try:
+                        updated = await intel_db.backfill_embedding_issue_number(
+                            pr_id=pr_data["pr_id"],
+                            repo=repo,
+                            issue_number=target_issue_number,
+                        )
+                        if updated > 0:
+                            logger.info(
+                                "Backfilled issue_number on %d embeddings",
+                                updated,
+                                extra={
+                                    "pr_id": pr_data["pr_id"],
+                                    "issue_number": target_issue_number,
+                                },
+                            )
+                    except Exception:
+                        logger.warning(
+                            "Embedding issue_number backfill failed, continuing",
+                            exc_info=True,
+                            extra={"pr_id": pr_data.get("pr_id")},
+                        )
+            except Exception:
+                logger.warning(
+                    "Issue extraction failed, continuing pipeline",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
+
         # ── Triage dedup gate (advisory only) ───────────────────────
         if (
             env is not None
@@ -167,6 +212,34 @@ async def handle_pr_event(
                 stake_amount_wei=state.bounty_amount_wei,
                 is_self_modification=state.is_self_modification,
             )
+
+        # ── Triage: competitive ranking ──────────────────────────
+        if (
+            config.triage.enabled
+            and config.triage.ranking.enabled
+            and target_issue_number is not None
+            and state.verdict
+        ):
+            try:
+                from src.triage.ranking import (  # noqa: PLC0415
+                    post_ranking_update,
+                )
+
+                await post_ranking_update(
+                    repo=repo,
+                    target_issue=target_issue_number,
+                    installation_id=installation_id,
+                    pr_number=pr_number,
+                    ranking_config=config.triage.ranking,
+                    github_client=github_client,
+                    intel_db=intel_db,
+                )
+            except Exception:
+                logger.warning(
+                    "Ranking update failed, continuing",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
 
     except Exception:
         logger.exception(

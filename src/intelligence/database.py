@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 9
+_CURRENT_SCHEMA_VERSION = 10
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -223,6 +223,17 @@ CREATE INDEX IF NOT EXISTS idx_pe_repo_created ON pr_embeddings(repo, created_at
 CREATE INDEX IF NOT EXISTS idx_vd_repo ON vision_documents(repo);
 CREATE INDEX IF NOT EXISTS idx_dr_status ON dispute_records(status);
 CREATE INDEX IF NOT EXISTS idx_dr_window ON dispute_records(window_id);
+
+CREATE TABLE IF NOT EXISTS ranking_updates (
+    id           TEXT PRIMARY KEY,
+    repo         TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    updated_at   TEXT NOT NULL,
+    ranking_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_ru_repo_issue ON ranking_updates(repo, issue_number);
+CREATE INDEX IF NOT EXISTS idx_pe_repo_issue ON pr_embeddings(repo, issue_number);
 """
 
 
@@ -491,6 +502,21 @@ class IntelligenceDB:
                     await db.execute(
                         "CREATE INDEX IF NOT EXISTS idx_pe_repo_created "
                         "ON pr_embeddings(repo, created_at DESC)",
+                    )
+                    await db.commit()
+                if current < 10:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS ranking_updates ("
+                        "    id           TEXT PRIMARY KEY,"
+                        "    repo         TEXT NOT NULL,"
+                        "    issue_number INTEGER NOT NULL,"
+                        "    updated_at   TEXT NOT NULL,"
+                        "    ranking_json TEXT NOT NULL DEFAULT '[]'"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_ru_repo_issue "
+                        "ON ranking_updates(repo, issue_number);"
+                        "CREATE INDEX IF NOT EXISTS idx_pe_repo_issue "
+                        "ON pr_embeddings(repo, issue_number);"
                     )
                     await db.commit()
                 await db.execute(
@@ -1531,6 +1557,101 @@ class IntelligenceDB:
                 registered_at=datetime.fromisoformat(row[5]),
             )
 
+    # ── Ranking ──────────────────────────────────────────────────────────
+
+    async def get_ranked_prs(
+        self, repo: str, issue_number: int,
+    ) -> list[dict[str, object]]:
+        """Return PRs targeting an issue, ranked by latest composite score.
+
+        Uses a window function to select the most recent pipeline run per PR,
+        then joins with ``pr_embeddings`` for issue linkage.  Read-only — no
+        ``_write_lock`` required.
+        """
+        db = self._require_db()
+        sql = """\
+            SELECT pe.pr_number, ph.pr_id, ph.composite_score,
+                   ph.verdict, ph.pr_author
+            FROM pr_embeddings pe
+            INNER JOIN (
+                SELECT pr_id, composite_score, verdict, pr_author,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY pr_id ORDER BY created_at DESC
+                       ) AS rn
+                FROM pipeline_history WHERE repo = ?
+            ) ph ON pe.pr_id = ph.pr_id AND ph.rn = 1
+            WHERE pe.repo = ? AND pe.issue_number = ?
+              AND ph.composite_score IS NOT NULL
+            ORDER BY ph.composite_score DESC, pe.pr_number ASC
+        """
+        async with db.execute(sql, (repo, repo, issue_number)) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def record_ranking_update(
+        self,
+        repo: str,
+        issue_number: int,
+        ranking_json: str,
+    ) -> None:
+        """Record a ranking update for rate-limiting purposes.
+
+        Uses ``uuid.uuid4()`` for the primary key to avoid collisions on
+        retries (per CLAUDE.md concurrency rules).
+
+        Prunes old rows to keep at most 5 per ``(repo, issue_number)``
+        for audit trail without unbounded growth.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        record_id = uuid.uuid4().hex[:16]
+        async with self._write_lock:
+            await db.execute(
+                "INSERT INTO ranking_updates "
+                "(id, repo, issue_number, updated_at, ranking_json) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (record_id, repo, issue_number, now, ranking_json),
+            )
+            # Prune: keep only 5 most recent per (repo, issue_number)
+            await db.execute(
+                "DELETE FROM ranking_updates "
+                "WHERE repo = ? AND issue_number = ? "
+                "AND id NOT IN ("
+                "    SELECT id FROM ranking_updates "
+                "    WHERE repo = ? AND issue_number = ? "
+                "    ORDER BY updated_at DESC LIMIT 5"
+                ")",
+                (repo, issue_number, repo, issue_number),
+            )
+            await db.commit()
+
+    async def was_ranking_recently_posted(
+        self,
+        repo: str,
+        issue_number: int,
+        interval_seconds: int,
+    ) -> bool:
+        """Check if a ranking update was posted within the given interval.
+
+        Returns ``False`` if no record exists (first post is always allowed).
+        Read-only — no ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT updated_at FROM ranking_updates "
+            "WHERE repo = ? AND issue_number = ? "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (repo, issue_number),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row is None:
+            return False
+
+        last_update = datetime.fromisoformat(row[0])
+        elapsed = (datetime.now(UTC) - last_update).total_seconds()
+        return elapsed < interval_seconds
+
     # ── Embeddings ───────────────────────────────────────────────────────
 
     async def store_embedding(
@@ -1556,12 +1677,37 @@ class IntelligenceDB:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     embedding = excluded.embedding,
-                    embedding_model = excluded.embedding_model
+                    embedding_model = excluded.embedding_model,
+                    issue_number = excluded.issue_number
                 """,
                 (emb_id, pr_id, repo, pr_number, commit_sha,
                  embedding_blob, embedding_model, issue_number, now),
             )
             await db.commit()
+
+    async def backfill_embedding_issue_number(
+        self,
+        pr_id: str,
+        repo: str,
+        issue_number: int,
+    ) -> int:
+        """Backfill ``issue_number`` on existing embeddings that have NULL.
+
+        Only updates rows where ``issue_number IS NULL`` — will not overwrite
+        intentionally set values.  Idempotent: a second call returns 0.
+
+        Returns the number of rows updated.
+        """
+        db = self._require_db()
+        async with self._write_lock:
+            cursor = await db.execute(
+                "UPDATE pr_embeddings SET issue_number = ? "
+                "WHERE pr_id = ? AND repo = ? AND issue_number IS NULL",
+                (issue_number, pr_id, repo),
+            )
+            updated = cursor.rowcount
+            await db.commit()
+            return updated
 
     async def find_similar_prs(
         self,

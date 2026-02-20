@@ -439,6 +439,38 @@ class GitHubClient:
         result: dict[str, Any] = response.json()
         return result
 
+    async def list_issue_comments(
+        self,
+        repo: str,
+        issue_number: int,
+        installation_id: int,
+    ) -> list[dict[str, Any]]:
+        """List all comments on an issue (or PR)."""
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/issues/{issue_number}/comments",
+            installation_id=installation_id,
+        )
+        result: list[dict[str, Any]] = response.json()
+        return result
+
+    async def update_comment(
+        self,
+        repo: str,
+        comment_id: int,
+        installation_id: int,
+        body: str,
+    ) -> dict[str, Any]:
+        """Update an existing issue/PR comment by ID."""
+        response = await self._request(
+            "PATCH",
+            f"/repos/{repo}/issues/comments/{comment_id}",
+            installation_id=installation_id,
+            json_body={"body": body},
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
     async def add_label(
         self,
         repo: str,
@@ -472,6 +504,36 @@ class GitHubClient:
                 f"/repos/{repo}/issues/{issue_number}/labels/{label}",
                 installation_id=installation_id,
             )
+
+    async def ensure_label(
+        self,
+        repo: str,
+        installation_id: int,
+        label: str,
+        *,
+        color: str = "0e8a16",
+        description: str = "",
+    ) -> None:
+        """Create a label in the repo if it doesn't already exist.
+
+        Catches the 422 "already_exists" response from GitHub and treats
+        it as success.  Other errors propagate normally.
+        """
+        try:
+            await self._request(
+                "POST",
+                f"/repos/{repo}/labels",
+                installation_id=installation_id,
+                json_body={
+                    "name": label,
+                    "color": color,
+                    "description": description,
+                },
+            )
+        except GitHubError as exc:
+            if exc.status_code == 422 and "already_exists" in exc.response_body:
+                return
+            raise
 
     async def clone_repo(
         self,

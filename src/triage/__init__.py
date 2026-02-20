@@ -1,1 +1,1 @@
-"""Pre-pipeline triage gates: dedup detection, ranking, and advisory review."""
+"""Pre-pipeline triage gates: dedup detection, issue linking, ranking, and advisory review."""

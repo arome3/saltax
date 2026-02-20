@@ -245,6 +245,33 @@ class TestCrossValidation:
         errors = validate_config(cfg)
         assert any("self_modification_window_hours" in e for e in errors)
 
+    def test_validate_ranking_requires_dedup(self) -> None:
+        """GAP 5: ranking on + dedup off → warning present."""
+        cfg = SaltaXConfig()
+        cfg.triage.enabled = True
+        cfg.triage.ranking.enabled = True
+        cfg.triage.dedup.enabled = False
+        errors = validate_config(cfg)
+        assert any("ranking" in e and "dedup" in e for e in errors)
+
+    def test_validate_ranking_with_dedup_ok(self) -> None:
+        """GAP 5: ranking on + dedup on → no ranking-related warning."""
+        cfg = SaltaXConfig()
+        cfg.triage.enabled = True
+        cfg.triage.ranking.enabled = True
+        cfg.triage.dedup.enabled = True
+        errors = validate_config(cfg)
+        assert not any("ranking" in e and "dedup" in e for e in errors)
+
+    def test_validate_ranking_disabled_no_warning(self) -> None:
+        """GAP 5: ranking off → no warning regardless of dedup."""
+        cfg = SaltaXConfig()
+        cfg.triage.enabled = True
+        cfg.triage.ranking.enabled = False
+        cfg.triage.dedup.enabled = False
+        errors = validate_config(cfg)
+        assert not any("ranking" in e and "dedup" in e for e in errors)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # F. Edge cases

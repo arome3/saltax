@@ -701,7 +701,60 @@ class TestCommentGating:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# H. _emit_metric
+# H. issue_number forwarding
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIssueNumberForwarding:
+    """GAP 1: Verify issue_number flows from state to store_embedding."""
+
+    async def test_issue_number_forwarded_when_present(self) -> None:
+        """target_issue_number in state → passed as issue_number to store_embedding."""
+        config = _make_config()
+        query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+
+        intel_db = AsyncMock()
+        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
+
+        state = _make_state()
+        state["target_issue_number"] = 42
+
+        with patch(
+            "src.triage.dedup.embed_diff",
+            new_callable=AsyncMock,
+            return_value=query_vec,
+        ):
+            await run_dedup_check(state, config, AsyncMock(), intel_db)
+
+        intel_db.store_embedding.assert_awaited_once()
+        call_kwargs = intel_db.store_embedding.call_args.kwargs
+        assert call_kwargs["issue_number"] == 42
+
+    async def test_issue_number_none_when_absent(self) -> None:
+        """No target_issue_number in state → issue_number=None passed."""
+        config = _make_config()
+        query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+
+        intel_db = AsyncMock()
+        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
+
+        state = _make_state()
+        # No target_issue_number key
+
+        with patch(
+            "src.triage.dedup.embed_diff",
+            new_callable=AsyncMock,
+            return_value=query_vec,
+        ):
+            await run_dedup_check(state, config, AsyncMock(), intel_db)
+
+        intel_db.store_embedding.assert_awaited_once()
+        call_kwargs = intel_db.store_embedding.call_args.kwargs
+        assert call_kwargs["issue_number"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# I. _emit_metric
 # ═══════════════════════════════════════════════════════════════════════════════
 
 

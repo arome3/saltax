@@ -151,6 +151,7 @@ async def run_dedup_check(
     pr_number: int = state.get("pr_number", 0)
     pr_id: str = state.get("pr_id", "")
     commit_sha: str = state.get("commit_sha", "")
+    issue_number: int | None = state.get("target_issue_number")
 
     # 2. Gate: non-empty diff
     if not diff or not diff.strip():
@@ -178,6 +179,7 @@ async def run_dedup_check(
             commit_sha=commit_sha,
             embedding_blob=embedding_blob,
             embedding_model=config.triage.dedup.embedding_model,
+            issue_number=issue_number,
         )
     except Exception:
         logger.warning(
