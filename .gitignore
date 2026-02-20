@@ -35,6 +35,7 @@ htmlcov/
 # Foundry
 contracts/out/
 contracts/cache/
+contracts/lib/
 
 # Internal documentation (not published)
 docs/
