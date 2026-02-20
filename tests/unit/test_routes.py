@@ -45,6 +45,7 @@ def _make_app() -> FastAPI:
     config.audit_pricing.security_only_usdc = 5.0
     config.audit_pricing.quality_only_usdc = 3.0
     config.audit_pricing.full_audit_usdc = 10.0
+    config.triage.vision.source = "api"
 
     wallet = MagicMock()
     wallet.address = "0x" + "0" * 40
@@ -302,7 +303,7 @@ class TestVisionRoute:
             "/api/v1/vision",
             json={
                 "repo": "owner/repo",
-                "document": "# Project Vision\n\nBuild something great.",
+                "content": "# Project Vision\n\nBuild something great.",
                 "title": "Project Vision",
             },
         )
@@ -316,6 +317,39 @@ class TestVisionRoute:
             json={"repo": "owner/repo"},
         )
         assert response.status_code == 422
+
+    async def test_empty_content_returns_400(self, client: AsyncClient) -> None:
+        response = await client.post(
+            "/api/v1/vision",
+            json={"repo": "owner/repo", "content": "   "},
+        )
+        assert response.status_code == 400
+
+    async def test_oversized_content_returns_400(self, client: AsyncClient) -> None:
+        response = await client.post(
+            "/api/v1/vision",
+            json={"repo": "owner/repo", "content": "x" * 200_000},
+        )
+        assert response.status_code == 400
+
+    async def test_wrong_source_returns_400(self, client: AsyncClient) -> None:
+        """When source != 'api', the endpoint rejects ingestion."""
+        app = _make_app()
+        app.state.config.triage.vision.source = "repo"
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/api/v1/vision",
+                json={"repo": "owner/repo", "content": "# Vision"},
+            )
+        assert response.status_code == 400
+
+    async def test_missing_repo_slash_returns_400(self, client: AsyncClient) -> None:
+        response = await client.post(
+            "/api/v1/vision",
+            json={"repo": "noslash", "content": "# Vision"},
+        )
+        assert response.status_code == 400
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

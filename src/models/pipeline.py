@@ -51,6 +51,7 @@ class AIAnalysisResult(BaseModel):
     reasoning: str  # Chain-of-thought for attestation
     vision_alignment_score: int | None = None
     vision_concerns: list[str] = Field(default_factory=list)
+    vision_goal_scores: dict[str, int] | None = None
 
 
 # ── Test result ─────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ import os
 import sqlite3
 import stat
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 10
+_CURRENT_SCHEMA_VERSION = 12
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -167,10 +167,26 @@ CREATE TABLE IF NOT EXISTS pr_embeddings (
 CREATE TABLE IF NOT EXISTS vision_documents (
     id           TEXT PRIMARY KEY,
     repo         TEXT NOT NULL,
+    doc_type     TEXT NOT NULL DEFAULT 'vision',
     content      TEXT NOT NULL,
     embedding    BLOB,
     updated_at   TEXT NOT NULL
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_vd_repo_doctype
+    ON vision_documents(repo, doc_type);
+
+CREATE TABLE IF NOT EXISTS vision_score_history (
+    id               TEXT PRIMARY KEY,
+    repo             TEXT NOT NULL,
+    pr_id            TEXT NOT NULL,
+    pr_number        INTEGER NOT NULL DEFAULT 0,
+    vision_score     INTEGER NOT NULL,
+    ai_confidence    REAL NOT NULL,
+    goal_scores_json TEXT,
+    created_at       TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vsh_repo_created
+    ON vision_score_history(repo, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS agent_identity_cache (
     wallet_address  TEXT PRIMARY KEY,
@@ -517,6 +533,33 @@ class IntelligenceDB:
                         "ON ranking_updates(repo, issue_number);"
                         "CREATE INDEX IF NOT EXISTS idx_pe_repo_issue "
                         "ON pr_embeddings(repo, issue_number);"
+                    )
+                    await db.commit()
+                if current < 11:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        await db.execute(
+                            "ALTER TABLE vision_documents "
+                            "ADD COLUMN doc_type TEXT NOT NULL DEFAULT 'vision'",
+                        )
+                    await db.execute(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS idx_vd_repo_doctype "
+                        "ON vision_documents(repo, doc_type)",
+                    )
+                    await db.commit()
+                if current < 12:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS vision_score_history ("
+                        "    id               TEXT PRIMARY KEY,"
+                        "    repo             TEXT NOT NULL,"
+                        "    pr_id            TEXT NOT NULL,"
+                        "    pr_number        INTEGER NOT NULL DEFAULT 0,"
+                        "    vision_score     INTEGER NOT NULL,"
+                        "    ai_confidence    REAL NOT NULL,"
+                        "    goal_scores_json TEXT,"
+                        "    created_at       TEXT NOT NULL"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_vsh_repo_created "
+                        "ON vision_score_history(repo, created_at DESC);"
                     )
                     await db.commit()
                 await db.execute(
@@ -1488,21 +1531,162 @@ class IntelligenceDB:
         doc_id: str,
         repo: str,
         content: str,
+        doc_type: str = "vision",
         embedding: bytes | None = None,
     ) -> None:
-        """Store or update a vision document."""
+        """Store or update a vision document.
+
+        Uses ``_retry_on_busy`` to handle SQLITE_BUSY under write contention.
+        """
         db = self._require_db()
         now = datetime.now(UTC).isoformat()
-        async with self._write_lock:
-            await db.execute(
-                """\
-                INSERT OR REPLACE INTO vision_documents
-                    (id, repo, content, embedding, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (doc_id, repo, content, embedding, now),
+
+        async def _do_store() -> None:
+            async with self._write_lock:
+                await db.execute(
+                    """\
+                    INSERT OR REPLACE INTO vision_documents
+                        (id, repo, doc_type, content, embedding, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (doc_id, repo, doc_type, content, embedding, now),
+                )
+                await db.commit()
+
+        await _retry_on_busy(_do_store)
+
+    async def get_vision_document(self, repo: str) -> dict[str, str] | None:
+        """Return the cached vision document for *repo*, or ``None``.
+
+        Backward-compat wrapper — returns the first ``vision``-type document.
+        The ``embedding`` BLOB is intentionally excluded — it is only used
+        by the similarity engine, not by prompt construction.
+        """
+        docs = await self.get_vision_documents(repo, doc_type="vision")
+        return docs[0] if docs else None
+
+    async def get_vision_documents(
+        self, repo: str, doc_type: str | None = None,
+    ) -> list[dict[str, object]]:
+        """Return vision documents for *repo*, optionally filtered by type.
+
+        Each dict includes ``id``, ``repo``, ``doc_type``, ``content``,
+        ``embedding`` (bytes or None), and ``updated_at``.
+        """
+        db = self._require_db()
+        if doc_type is not None:
+            cursor = await db.execute(
+                "SELECT id, repo, doc_type, content, embedding, updated_at "
+                "FROM vision_documents WHERE repo = ? AND doc_type = ?",
+                (repo, doc_type),
             )
-            await db.commit()
+        else:
+            cursor = await db.execute(
+                "SELECT id, repo, doc_type, content, embedding, updated_at "
+                "FROM vision_documents WHERE repo = ?",
+                (repo,),
+            )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": row[0],
+                "repo": row[1],
+                "doc_type": row[2],
+                "content": row[3],
+                "embedding": row[4],
+                "updated_at": row[5],
+            }
+            for row in rows
+        ]
+
+    async def purge_stale_vision_documents(
+        self, max_age_days: int = 90,
+    ) -> int:
+        """Delete vision documents older than *max_age_days*.
+
+        Uses ``_write_lock`` + ``_retry_on_busy``.  Returns the number of
+        deleted rows.
+        """
+        db = self._require_db()
+        cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
+
+        async def _do_purge() -> int:
+            async with self._write_lock:
+                cursor = await db.execute(
+                    "DELETE FROM vision_documents WHERE updated_at < ?",
+                    (cutoff,),
+                )
+                deleted = cursor.rowcount
+                await db.commit()
+                return deleted
+
+        return await _retry_on_busy(_do_purge)
+
+    # ── Vision score trending ────────────────────────────────────────────
+
+    async def store_vision_score(
+        self,
+        *,
+        repo: str,
+        pr_id: str,
+        pr_number: int,
+        vision_score: int,
+        ai_confidence: float,
+        goal_scores_json: str | None = None,
+    ) -> None:
+        """Record a vision alignment score for trending.
+
+        Uses ``uuid.uuid4()`` for retry-safe IDs.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        score_id = uuid.uuid4().hex[:16]
+
+        async def _do_store() -> None:
+            async with self._write_lock:
+                await db.execute(
+                    """\
+                    INSERT INTO vision_score_history
+                        (id, repo, pr_id, pr_number, vision_score,
+                         ai_confidence, goal_scores_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        score_id, repo, pr_id, pr_number,
+                        vision_score, ai_confidence,
+                        goal_scores_json, now,
+                    ),
+                )
+                await db.commit()
+
+        await _retry_on_busy(_do_store)
+
+    async def get_vision_score_trend(
+        self, repo: str, limit: int = 20,
+    ) -> list[dict[str, object]]:
+        """Return recent vision scores for *repo*, newest first."""
+        db = self._require_db()
+        cursor = await db.execute(
+            "SELECT id, repo, pr_id, pr_number, vision_score, "
+            "ai_confidence, goal_scores_json, created_at "
+            "FROM vision_score_history "
+            "WHERE repo = ? ORDER BY created_at DESC LIMIT ?",
+            (repo, limit),
+        )
+        rows = await cursor.fetchall()
+        return [
+            {
+                "id": row[0],
+                "repo": row[1],
+                "pr_id": row[2],
+                "pr_number": row[3],
+                "vision_score": row[4],
+                "ai_confidence": row[5],
+                "goal_scores_json": row[6],
+                "created_at": row[7],
+            }
+            for row in rows
+        ]
 
     # ── Identity cache ────────────────────────────────────────────────────
 

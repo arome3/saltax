@@ -7,6 +7,7 @@ to handle transient failures and sustained GitHub outages gracefully.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from enum import StrEnum
@@ -574,6 +575,37 @@ class GitHubClient:
             raise GitHubError(
                 f"git clone failed (exit {process.returncode}): {error_msg}",
             )
+
+    # ── File contents ──────────────────────────────────────────────────────
+
+    async def get_file_contents(
+        self, repo: str, path: str, *, installation_id: int,
+    ) -> str | None:
+        """Fetch a single file's contents from a GitHub repository.
+
+        Returns decoded UTF-8 text, or ``None`` when the file does not exist
+        (404) or exceeds the 1 MB Contents API limit (non-rate-limit 403).
+        Rate-limit errors (``GitHubRateLimitError``) propagate to the caller.
+        """
+        try:
+            response = await self._request(
+                "GET",
+                f"/repos/{repo}/contents/{path}",
+                installation_id=installation_id,
+            )
+        except GitHubNotFoundError:
+            return None
+        except GitHubError as exc:
+            # Non-rate-limit 403 → file too large for Contents API
+            if exc.status_code == 403:
+                return None
+            raise
+
+        data = response.json()
+        encoded = data.get("content", "")
+        return base64.b64decode(encoded.replace("\n", "")).decode(
+            "utf-8", errors="replace",
+        )
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from src.github.exceptions import GitHubRateLimitError
+
 if TYPE_CHECKING:
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
@@ -178,6 +180,35 @@ async def handle_pr_event(
             except Exception:
                 logger.warning(
                     "Dedup gate failed, continuing pipeline",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
+
+        # ── Triage: load vision document ──────────────────────────────
+        if config.triage.enabled and config.triage.vision.enabled:
+            try:
+                from src.triage.vision import (  # noqa: PLC0415
+                    load_vision_documents,
+                )
+
+                vision_doc = await load_vision_documents(
+                    repo,
+                    installation_id,
+                    config=config,
+                    intel_db=intel_db,
+                    github_client=github_client,
+                    env=env,
+                )
+                if vision_doc is not None:
+                    state_dict["vision_document"] = vision_doc
+            except GitHubRateLimitError:
+                logger.warning(
+                    "Vision load skipped: GitHub rate limit exceeded",
+                    extra={"pr_id": pr_data.get("pr_id"), "repo": repo},
+                )
+            except Exception:
+                logger.warning(
+                    "Vision document load failed, continuing pipeline",
                     exc_info=True,
                     extra={"pr_id": pr_data.get("pr_id")},
                 )

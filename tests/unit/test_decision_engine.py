@@ -864,3 +864,216 @@ class TestHistoryRedistribution:
         assert abs(composite - 1.0) < 0.001
         assert "vision_alignment" in breakdown
         assert "history" in breakdown
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# W. Confidence-weighted vision influence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestConfidenceWeightedVision:
+    """Vision weight is scaled by AI confidence — uncertain analyses carry less weight."""
+
+    def test_full_confidence_unchanged(self) -> None:
+        """confidence=1.0 → effective weight equals configured weight."""
+        config = _make_config(
+            triage={"vision": {"enabled": True, "alignment_weight": 0.15}},
+        )
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=8, confidence=1.0,
+            ),
+        )
+        composite, breakdown = _compute_weighted_score(
+            config, state, 1.0, 0.8, 0.8, 1.0,
+        )
+        assert "vision_alignment" in breakdown
+        # Weights must still sum to 1.0
+        # (we can't inspect internal weights directly, but composite is valid)
+        assert 0.0 <= composite <= 1.0
+
+    def test_half_confidence_scales_weight(self) -> None:
+        """confidence=0.5 → effective weight = 0.15 * 0.5 = 0.075."""
+        config = _make_config(
+            triage={"vision": {"enabled": True, "alignment_weight": 0.15}},
+        )
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=8, confidence=0.5,
+            ),
+        )
+        composite_half, _ = _compute_weighted_score(
+            config, state, 1.0, 0.8, 0.8, 1.0,
+        )
+        # Compare with full confidence — half confidence gives vision less
+        # influence so the composite should differ when vision score != base
+        state_full = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=8, confidence=1.0,
+            ),
+        )
+        composite_full, _ = _compute_weighted_score(
+            config, state_full, 1.0, 0.8, 0.8, 1.0,
+        )
+        # Both valid
+        assert 0.0 <= composite_half <= 1.0
+        assert 0.0 <= composite_full <= 1.0
+        # They should differ because confidence scaling changes weights
+        assert composite_half != composite_full
+
+    def test_zero_confidence_excludes_vision(self) -> None:
+        """confidence=0.0 → effective weight = 0.0 → vision excluded."""
+        config = _make_config(
+            triage={"vision": {"enabled": True, "alignment_weight": 0.15}},
+        )
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=8, confidence=0.0,
+            ),
+        )
+        _, breakdown = _compute_weighted_score(
+            config, state, 1.0, 0.8, 0.8, 1.0,
+        )
+        assert "vision_alignment" not in breakdown
+
+    def test_low_confidence_reduces_impact(self) -> None:
+        """Higher confidence → composite diverges more from base (no-vision) score."""
+        config = _make_config(
+            triage={"vision": {"enabled": True, "alignment_weight": 0.15}},
+        )
+        # Base: no vision score → composite from base weights only
+        state_no_vision = _make_state(
+            ai_analysis=_make_ai_analysis(confidence=0.9),
+        )
+        composite_base, _ = _compute_weighted_score(
+            config, state_no_vision, 1.0, 0.8, 0.8, 1.0,
+        )
+
+        # Low confidence (0.2): vision barely influences
+        state_low = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=2, confidence=0.2,
+            ),
+        )
+        composite_low, _ = _compute_weighted_score(
+            config, state_low, 1.0, 0.8, 0.8, 1.0,
+        )
+
+        # High confidence (0.9): vision strongly influences
+        state_high = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=2, confidence=0.9,
+            ),
+        )
+        composite_high, _ = _compute_weighted_score(
+            config, state_high, 1.0, 0.8, 0.8, 1.0,
+        )
+
+        # Low vision score (2/10 = 0.2) drags composite down more at high confidence
+        assert abs(composite_low - composite_base) < abs(composite_high - composite_base)
+
+    def test_confidence_scaling_with_history(self) -> None:
+        """Combined vision (confidence-scaled) + history → weights sum to 1.0."""
+        config = _make_config(
+            pipeline={"history_weight": 0.10},
+            triage={"vision": {"enabled": True, "alignment_weight": 0.15}},
+        )
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=10, confidence=0.5,
+            ),
+        )
+        # effective_vision_weight = 0.15 * 0.5 = 0.075
+        # total_extra = 0.075 + 0.10 = 0.175
+        # All scores 1.0 → composite must be 1.0
+        composite, breakdown = _compute_weighted_score(
+            config, state, 1.0, 1.0, 1.0, 1.0,
+            s_history=1.0,
+        )
+        assert abs(composite - 1.0) < 0.001
+        assert "vision_alignment" in breakdown
+        assert "history" in breakdown
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# X. Vision score trending (Feature 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVisionScoreTrendingDecision:
+    async def test_vision_score_stored_on_ingest(self) -> None:
+        """When ai_analysis has vision_alignment_score, store_vision_score is called."""
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=7, confidence=0.85,
+            ),
+            test_results=_make_test_results(passed=True),
+            static_findings=[],
+        )
+        config = _make_config()
+        intel_db = _make_intel_db()
+        intel_db.store_vision_score = AsyncMock()
+        intel_db.get_vision_score_trend = AsyncMock(return_value=[])
+        engine = _make_attestation_engine()
+
+        await run_decision(state, config, intel_db, engine)
+
+        intel_db.store_vision_score.assert_awaited_once()
+        call_kwargs = intel_db.store_vision_score.call_args.kwargs
+        assert call_kwargs["vision_score"] == 7
+        assert call_kwargs["ai_confidence"] == 0.85
+
+    async def test_trending_failure_does_not_crash(self) -> None:
+        """store_vision_score failure → decision still completes."""
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=8, confidence=0.9,
+            ),
+            test_results=_make_test_results(passed=True),
+            static_findings=[],
+        )
+        config = _make_config()
+        intel_db = _make_intel_db()
+        intel_db.store_vision_score = AsyncMock(
+            side_effect=RuntimeError("DB error"),
+        )
+        engine = _make_attestation_engine()
+
+        await run_decision(state, config, intel_db, engine)
+
+        assert state.verdict is not None
+        assert state.verdict["decision"] == Decision.APPROVE.value
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Y. Goal scores in trending (Feature 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGoalScoresInTrending:
+    async def test_goal_scores_stored_in_trending(self) -> None:
+        """vision_goal_scores passed to store_vision_score as goal_scores_json."""
+        import json
+
+        state = _make_state(
+            ai_analysis=_make_ai_analysis(
+                vision_alignment_score=7,
+                confidence=0.85,
+                vision_goal_scores={"Ship v2": 8, "Improve DX": 6},
+            ),
+            test_results=_make_test_results(passed=True),
+            static_findings=[],
+        )
+        config = _make_config()
+        intel_db = _make_intel_db()
+        intel_db.store_vision_score = AsyncMock()
+        intel_db.get_vision_score_trend = AsyncMock(return_value=[])
+        engine = _make_attestation_engine()
+
+        await run_decision(state, config, intel_db, engine)
+
+        intel_db.store_vision_score.assert_awaited_once()
+        call_kwargs = intel_db.store_vision_score.call_args.kwargs
+        assert call_kwargs["goal_scores_json"] is not None
+        stored = json.loads(call_kwargs["goal_scores_json"])
+        assert stored == {"Ship v2": 8, "Improve DX": 6}

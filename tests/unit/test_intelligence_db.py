@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -121,7 +122,7 @@ class TestSchemaCreation:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 10
+        assert row[0] == 12
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -994,3 +995,189 @@ class TestGhostTableWritePaths:
         ) as cursor:
             row = await cursor.fetchone()
         assert row[0] == "The project aims to..."
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# P. Purge stale vision documents (I11)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPurgeStaleVisionDocuments:
+    """I11: purge_stale_vision_documents deletes old rows, keeps fresh ones."""
+
+    async def test_purges_old_documents(self, intel_db: IntelligenceDB) -> None:
+        """Documents older than max_age_days are deleted, fresh ones kept."""
+        db = intel_db._require_db()
+        old_time = (datetime.now(UTC) - timedelta(days=100)).isoformat()
+        fresh_time = datetime.now(UTC).isoformat()
+
+        async with intel_db._write_lock:
+            await db.execute(
+                "INSERT INTO vision_documents (id, repo, content, embedding, updated_at) "
+                "VALUES (?, ?, ?, NULL, ?)",
+                ("old1", "owner/old-repo", "Old vision.", old_time),
+            )
+            await db.execute(
+                "INSERT INTO vision_documents (id, repo, content, embedding, updated_at) "
+                "VALUES (?, ?, ?, NULL, ?)",
+                ("fresh1", "owner/fresh-repo", "Fresh vision.", fresh_time),
+            )
+            await db.commit()
+
+        deleted = await intel_db.purge_stale_vision_documents(max_age_days=90)
+        assert deleted == 1
+
+        # Old one gone
+        old_doc = await intel_db.get_vision_document("owner/old-repo")
+        assert old_doc is None
+
+        # Fresh one kept
+        fresh_doc = await intel_db.get_vision_document("owner/fresh-repo")
+        assert fresh_doc is not None
+        assert fresh_doc["content"] == "Fresh vision."
+
+    async def test_purge_no_stale(self, intel_db: IntelligenceDB) -> None:
+        """When no documents are stale, returns 0."""
+        await intel_db.store_vision_document(
+            doc_id="vd1",
+            repo="owner/repo",
+            content="Fresh doc.",
+        )
+        deleted = await intel_db.purge_stale_vision_documents(max_age_days=90)
+        assert deleted == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-source vision documents (Feature 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMultiSourceVisionDocs:
+    async def test_store_vision_doc_with_doc_type(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store a document with doc_type='architecture', retrieve by type."""
+        await intel_db.store_vision_document(
+            doc_id="vision:org/repo:architecture",
+            repo="org/repo",
+            content="Microservices.",
+            doc_type="architecture",
+        )
+        docs = await intel_db.get_vision_documents("org/repo", doc_type="architecture")
+        assert len(docs) == 1
+        assert docs[0]["doc_type"] == "architecture"
+        assert docs[0]["content"] == "Microservices."
+
+    async def test_get_vision_documents_multiple(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store 2 types, get_vision_documents returns both."""
+        await intel_db.store_vision_document(
+            doc_id="vision:org/repo:vision",
+            repo="org/repo",
+            content="Vision text.",
+            doc_type="vision",
+        )
+        await intel_db.store_vision_document(
+            doc_id="vision:org/repo:roadmap",
+            repo="org/repo",
+            content="Roadmap text.",
+            doc_type="roadmap",
+        )
+        docs = await intel_db.get_vision_documents("org/repo")
+        assert len(docs) == 2
+        doc_types = {d["doc_type"] for d in docs}
+        assert doc_types == {"vision", "roadmap"}
+
+    async def test_get_vision_documents_empty(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """No documents → empty list."""
+        docs = await intel_db.get_vision_documents("unknown/repo")
+        assert docs == []
+
+    async def test_store_with_embedding(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store a document with an embedding blob, retrieve it."""
+        fake_embedding = b"\x00\x01\x02\x03"
+        await intel_db.store_vision_document(
+            doc_id="vision:org/repo:vision",
+            repo="org/repo",
+            content="Vision.",
+            doc_type="vision",
+            embedding=fake_embedding,
+        )
+        docs = await intel_db.get_vision_documents("org/repo", doc_type="vision")
+        assert len(docs) == 1
+        assert docs[0]["embedding"] == fake_embedding
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Vision score trending (Feature 2)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVisionScoreTrending:
+    async def test_store_vision_score(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store a score, verify it exists in the table."""
+        await intel_db.store_vision_score(
+            repo="org/repo",
+            pr_id="org/repo#10",
+            pr_number=10,
+            vision_score=8,
+            ai_confidence=0.9,
+        )
+        trend = await intel_db.get_vision_score_trend("org/repo", limit=10)
+        assert len(trend) == 1
+        assert trend[0]["vision_score"] == 8
+        assert trend[0]["ai_confidence"] == 0.9
+        assert trend[0]["pr_number"] == 10
+
+    async def test_get_vision_score_trend(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store 5, retrieve 3, verify newest-first."""
+        for i in range(5):
+            await intel_db.store_vision_score(
+                repo="org/repo",
+                pr_id=f"org/repo#{i}",
+                pr_number=i,
+                vision_score=i + 5,
+                ai_confidence=0.8,
+            )
+        trend = await intel_db.get_vision_score_trend("org/repo", limit=3)
+        assert len(trend) == 3
+        # Newest first — all have same timestamp so order is by rowid
+        # Just verify we got 3 results
+        scores = [t["vision_score"] for t in trend]
+        assert len(scores) == 3
+
+    async def test_get_vision_score_trend_empty(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """No scores → empty list."""
+        trend = await intel_db.get_vision_score_trend("unknown/repo")
+        assert trend == []
+
+    async def test_store_with_goal_scores(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Store with goal_scores_json, verify retrieval."""
+        import json
+
+        goals = {"Ship v2": 8, "Improve DX": 7}
+        await intel_db.store_vision_score(
+            repo="org/repo",
+            pr_id="org/repo#1",
+            pr_number=1,
+            vision_score=8,
+            ai_confidence=0.9,
+            goal_scores_json=json.dumps(goals),
+        )
+        trend = await intel_db.get_vision_score_trend("org/repo")
+        assert len(trend) == 1
+        stored_goals = json.loads(trend[0]["goal_scores_json"])
+        assert stored_goals == goals

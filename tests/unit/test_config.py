@@ -363,3 +363,70 @@ class TestLiteralTypes:
         """Advisory review_type not 'COMMENT' is rejected."""
         with pytest.raises(ValidationError):
             SaltaXConfig(triage={"advisory": {"review_type": "APPROVE"}})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# H. Dead config removal (I3) and weight starvation (I7)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVisionConfigCleaned:
+    def test_alignment_warn_threshold_rejected(self) -> None:
+        """I3: alignment_warn_threshold is removed — extra fields are rejected."""
+        with pytest.raises(ValidationError):
+            VisionConfig(alignment_warn_threshold=5)  # type: ignore[call-arg]
+
+
+class TestWeightStarvation:
+    def test_validate_weight_starvation_warning(self) -> None:
+        """I7: combined > 0.50 with vision enabled → warning."""
+        cfg = SaltaXConfig()
+        cfg.triage.vision.enabled = True
+        cfg.triage.vision.alignment_weight = 0.30
+        cfg.pipeline.history_weight = 0.25
+        errors = validate_config(cfg)
+        assert any("starved" in e.lower() or "exceeds 0.50" in e for e in errors)
+
+    def test_validate_weight_starvation_ok(self) -> None:
+        """I7: combined <= 0.50 → no warning."""
+        cfg = SaltaXConfig()
+        cfg.triage.vision.enabled = True
+        cfg.triage.vision.alignment_weight = 0.15
+        cfg.pipeline.history_weight = 0.10
+        errors = validate_config(cfg)
+        assert not any("starved" in e.lower() or "exceeds 0.50" in e for e in errors)
+
+    def test_validate_weight_starvation_vision_disabled(self) -> None:
+        """I7: vision disabled → no warning even with high weights."""
+        cfg = SaltaXConfig()
+        cfg.triage.vision.enabled = False
+        cfg.triage.vision.alignment_weight = 0.30
+        cfg.pipeline.history_weight = 0.30
+        errors = validate_config(cfg)
+        assert not any("starved" in e.lower() or "exceeds 0.50" in e for e in errors)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L. Document types config (Feature 5)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDocumentTypesConfig:
+    def test_document_types_default(self) -> None:
+        """Default document_types is ['vision']."""
+        vc = VisionConfig()
+        assert vc.document_types == ["vision"]
+
+    def test_validate_config_invalid_doc_type(self) -> None:
+        """Unknown document type triggers a validation error."""
+        cfg = SaltaXConfig()
+        cfg.triage.vision.document_types = ["vision", "unknown"]
+        errors = validate_config(cfg)
+        assert any("unknown type 'unknown'" in e for e in errors)
+
+    def test_validate_config_valid_doc_types(self) -> None:
+        """All valid types pass validation."""
+        cfg = SaltaXConfig()
+        cfg.triage.vision.document_types = ["vision", "architecture", "roadmap"]
+        errors = validate_config(cfg)
+        assert not any("unknown type" in e for e in errors)

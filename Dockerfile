@@ -19,7 +19,7 @@ RUN npx tsc
 # ---------------------------------------------------------------------------
 # Stage 2: Python runtime (production image)
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim
+FROM --platform=linux/amd64 python:3.11-slim
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

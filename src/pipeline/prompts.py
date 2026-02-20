@@ -6,6 +6,10 @@ on orchestration, parsing, and error handling.
 
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 # ── System prompt ─────────────────────────────────────────────────────────────
 
 ANALYZER_SYSTEM_PROMPT = """\
@@ -67,8 +71,30 @@ _VISION_SYSTEM_EXTENSION = """
 Additionally, assess how well the code changes align with the project's vision
 document (provided in <vision_document> tags).  Include two extra fields in
 your JSON response:
-- "vision_alignment_score": <int 1-10> (1 = contradicts vision, 10 = perfect)
-- "vision_concerns": ["<string>", ...] (empty list if no concerns)\
+- "vision_alignment_score": <int 1-10>
+- "vision_concerns": ["<string>", ...] (empty list if no concerns)
+
+Scoring guidance — PENALIZE CONTRADICTIONS ONLY:
+- 1-4: The PR explicitly contradicts or undermines a stated vision goal.
+- 5-6: The PR is neutral — bug fixes, refactors, or unrelated work that neither
+  advances nor contradicts the vision.  This is the expected score for most PRs.
+- 7-8: The PR partially advances one or more vision goals.
+- 9-10: The PR directly and substantially advances a core vision objective.
+
+Do NOT penalize PRs simply because they do not advance the vision.  Routine
+maintenance, bug fixes, and infrastructure work are healthy and expected.\
+"""
+
+_VISION_GOAL_EXTENSION_TEMPLATE = """
+
+The vision document contains the following goals:
+{goal_list}
+
+In addition to the single "vision_alignment_score", also return:
+- "vision_goal_scores": {{"goal_name": <int 1-10>, ...}}
+
+Score each goal independently using the same 1-10 scale described above.
+Goals not relevant to this PR should receive a score of 5 (neutral).\
 """
 
 # ── Max limits ────────────────────────────────────────────────────────────────
@@ -82,10 +108,18 @@ _MAX_VISION_CHARS = 5_000
 # ── Builders ─────────────────────────────────────────────────────────────────
 
 
-def build_analyzer_system_prompt(*, vision_enabled: bool) -> str:
+def build_analyzer_system_prompt(
+    *,
+    vision_enabled: bool,
+    vision_goals: list[str] | None = None,
+) -> str:
     """Return the system prompt, optionally extended with vision instructions."""
     if vision_enabled:
-        return ANALYZER_SYSTEM_PROMPT + _VISION_SYSTEM_EXTENSION
+        prompt = ANALYZER_SYSTEM_PROMPT + _VISION_SYSTEM_EXTENSION
+        if vision_goals:
+            goal_list = "\n".join(f"- {g}" for g in vision_goals)
+            prompt += _VISION_GOAL_EXTENSION_TEMPLATE.format(goal_list=goal_list)
+        return prompt
     return ANALYZER_SYSTEM_PROMPT
 
 
@@ -143,6 +177,13 @@ def build_analyzer_user_prompt(
     if vision_document:
         truncated_vision = vision_document[:_MAX_VISION_CHARS]
         if len(vision_document) > _MAX_VISION_CHARS:
+            logger.info(
+                "Vision document truncated for prompt",
+                extra={
+                    "original_chars": len(vision_document),
+                    "truncated_chars": _MAX_VISION_CHARS,
+                },
+            )
             truncated_vision += "\n... [truncated]"
         parts.append(
             f"<vision_document>\n{truncated_vision}\n</vision_document>"

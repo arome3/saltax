@@ -29,6 +29,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+# ── Metrics helper ───────────────────────────────────────────────────────────
+
+
+def _emit_metric(name: str, value: object, **tags: object) -> None:
+    """Emit a structured metric via the JSON logger."""
+    logger.info(
+        "metric",
+        extra={"metric_name": name, "metric_value": value, **tags},
+    )
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 _PENALTY_PER_CRITICAL_OR_HIGH = 0.25
@@ -287,22 +298,37 @@ def _compute_weighted_score(
         else None
     )
 
-    use_vision = vision_weight > 0 and vision_score_raw is not None
+    # Scale vision weight by AI confidence — uncertain analyses reduce
+    # vision's influence on the verdict.  confidence=1.0 (default when
+    # absent) produces identical behavior to the unscaled path.
+    ai_confidence = float(ai_analysis.get("confidence", 1.0)) if ai_analysis else 1.0
+    effective_vision_weight = vision_weight * ai_confidence
+
+    use_vision = effective_vision_weight > 1e-9 and vision_score_raw is not None
     history_weight = config.pipeline.history_weight
     use_history = history_weight > 0 and s_history is not None
 
-    total_extra = (vision_weight if use_vision else 0.0) + (
+    total_extra = (effective_vision_weight if use_vision else 0.0) + (
         history_weight if use_history else 0.0
     )
     scale = 1.0 - total_extra
     weights = {k: v * scale for k, v in base_weights.items()}
 
     if use_vision:
-        weights["vision_alignment"] = vision_weight
+        weights["vision_alignment"] = effective_vision_weight
+        _emit_metric(
+            "decision.effective_vision_weight",
+            round(effective_vision_weight, 4),
+        )
         scores["vision_alignment"] = _clamp(float(vision_score_raw) / 10.0, 0.0, 1.0)
     if use_history:
         weights["history"] = history_weight
         scores["history"] = s_history
+
+    # Verify weights sum to 1.0 (per CLAUDE.md: no bare assert)
+    weight_sum = sum(weights.values())
+    if abs(weight_sum - 1.0) > 1e-9:
+        raise RuntimeError(f"Weight sum is {weight_sum:.10f}, expected 1.0")
 
     # Compute composite
     composite = sum(weights[k] * scores[k] for k in weights)
@@ -413,6 +439,43 @@ async def _ingest_results(
         logger.warning(
             "Failed to ingest pipeline results into intelligence DB", exc_info=True,
         )
+
+    # Store vision score for trending (best-effort)
+    try:
+        ai_analysis = state.ai_analysis
+        if ai_analysis is not None:
+            vs = ai_analysis.get("vision_alignment_score")
+            if vs is not None:
+                goal_scores_json: str | None = None
+                vgs = ai_analysis.get("vision_goal_scores")
+                if isinstance(vgs, dict):
+                    import json  # noqa: PLC0415
+
+                    goal_scores_json = json.dumps(vgs)
+
+                await intel_db.store_vision_score(
+                    repo=state.repo,
+                    pr_id=state.pr_id,
+                    pr_number=state.pr_number or 0,
+                    vision_score=int(vs),
+                    ai_confidence=float(ai_analysis.get("confidence", 0.0)),
+                    goal_scores_json=goal_scores_json,
+                )
+                # Emit drift metric
+                trend = await intel_db.get_vision_score_trend(
+                    state.repo, limit=10,
+                )
+                if len(trend) >= 3:
+                    avg = sum(
+                        int(r["vision_score"]) for r in trend
+                    ) / len(trend)
+                    _emit_metric(
+                        "vision.trend.moving_avg",
+                        round(avg, 2),
+                        repo=state.repo,
+                    )
+    except Exception:
+        logger.debug("Vision score trending failed", exc_info=True)
 
 
 # ── Small helpers ────────────────────────────────────────────────────────────

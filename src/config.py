@@ -229,8 +229,8 @@ class VisionConfig(BaseModel):
 
     enabled: bool = False
     alignment_weight: float = Field(default=0.15, ge=0.0, le=0.30)
-    alignment_warn_threshold: int = Field(default=5, ge=1, le=9)
     source: Literal["repo", "api"] = "repo"
+    document_types: list[str] = Field(default_factory=lambda: ["vision"])
 
 
 class AdvisoryConfig(BaseModel):
@@ -422,5 +422,23 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             "ranking requires dedup to store PR embeddings; "
             "enable dedup or disable ranking"
         )
+
+    # 9. Vision + history weight starvation
+    if cfg.triage.vision.enabled:
+        combined = cfg.triage.vision.alignment_weight + cfg.pipeline.history_weight
+        if combined > 0.50:
+            errors.append(
+                f"triage.vision.alignment_weight ({cfg.triage.vision.alignment_weight}) + "
+                f"pipeline.history_weight ({cfg.pipeline.history_weight}) = {combined:.2f} "
+                "exceeds 0.50 — base weights starved below 0.10 each"
+            )
+
+    # 10. Valid document types
+    _valid_doc_types = frozenset({"vision", "architecture", "roadmap"})
+    for dt in cfg.triage.vision.document_types:
+        if dt not in _valid_doc_types:
+            errors.append(
+                f"triage.vision.document_types: unknown type {dt!r}"
+            )
 
     return errors

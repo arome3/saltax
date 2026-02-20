@@ -100,7 +100,6 @@ VALID_YAML = textwrap.dedent("""\
       vision:
         enabled: false
         alignment_weight: 0.15
-        alignment_warn_threshold: 5
         source: "repo"
       advisory:
         review_type: "COMMENT"
