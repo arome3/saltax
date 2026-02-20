@@ -825,6 +825,8 @@ class TestPackageImports:
             "ReputationMetrics",
             "AttestationProof",
             "SignedVerdict",
+            "DependencyFinding",
+            "PatrolFinding",
         }
         actual = set(src.models.__all__)
         assert expected == actual

@@ -439,45 +439,45 @@ class TestRateLimiter:
 
 
 class TestDeliveryDedup:
-    def test_first_delivery_is_not_duplicate(self) -> None:
+    async def test_first_delivery_is_not_duplicate(self) -> None:
         from src.api.middleware.dedup import DeliveryDedup
 
         dedup = DeliveryDedup()
-        assert dedup.is_duplicate("delivery-1") is False
+        assert await dedup.is_duplicate("delivery-1") is False
 
-    def test_second_delivery_is_duplicate(self) -> None:
+    async def test_second_delivery_is_duplicate(self) -> None:
         from src.api.middleware.dedup import DeliveryDedup
 
         dedup = DeliveryDedup()
-        dedup.is_duplicate("delivery-2")
-        assert dedup.is_duplicate("delivery-2") is True
+        await dedup.is_duplicate("delivery-2")
+        assert await dedup.is_duplicate("delivery-2") is True
 
-    def test_unknown_delivery_id_allowed_through(self) -> None:
+    async def test_unknown_delivery_id_allowed_through(self) -> None:
         from src.api.middleware.dedup import DeliveryDedup
 
         dedup = DeliveryDedup()
         # Missing/unknown delivery IDs can't be deduplicated
-        assert dedup.is_duplicate("unknown") is False
-        assert dedup.is_duplicate("") is False
+        assert await dedup.is_duplicate("unknown") is False
+        assert await dedup.is_duplicate("") is False
 
-    def test_expired_entries_pruned(self) -> None:
-        import time
+    async def test_expired_entries_pruned(self) -> None:
+        import asyncio
 
         from src.api.middleware.dedup import DeliveryDedup
 
         dedup = DeliveryDedup(ttl_seconds=0.0)  # Instant expiry
-        dedup.is_duplicate("old-delivery")
+        await dedup.is_duplicate("old-delivery")
         # Force time advancement by waiting a tiny bit
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
         # After TTL, should not be considered duplicate
-        assert dedup.is_duplicate("old-delivery") is False
+        assert await dedup.is_duplicate("old-delivery") is False
 
-    def test_max_entries_enforced(self) -> None:
+    async def test_max_entries_enforced(self) -> None:
         from src.api.middleware.dedup import DeliveryDedup
 
         dedup = DeliveryDedup(max_entries=3)
         for i in range(10):
-            dedup.is_duplicate(f"d-{i}")
+            await dedup.is_duplicate(f"d-{i}")
         assert dedup.size <= 3
 
 

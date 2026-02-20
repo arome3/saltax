@@ -34,30 +34,11 @@ from src.pipeline.stages.ai_analyzer import (
     _reset_semaphore,
     run_ai_analysis,
 )
-from src.pipeline.state import PipelineState
+from tests.unit.conftest import make_pipeline_state as _make_state
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.ai_analyzer"
-
-
-def _make_state(**overrides: object) -> PipelineState:
-    defaults: dict[str, object] = {
-        "pr_id": "owner/repo#42",
-        "repo": "owner/repo",
-        "repo_url": "https://github.com/owner/repo.git",
-        "commit_sha": "abcd1234deadbeef",
-        "diff": (
-            "diff --git a/f.py b/f.py\n"
-            "--- a/f.py\n+++ b/f.py\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
-        ),
-        "base_branch": "main",
-        "head_branch": "fix/vuln",
-        "pr_author": "dev",
-    }
-    defaults.update(overrides)
-    return PipelineState(**defaults)  # type: ignore[arg-type]
 
 
 def _make_config(**overrides: Any) -> SaltaXConfig:

@@ -24,26 +24,11 @@ from src.pipeline.stages.test_executor import (
     _subprocess_env,
     run_tests,
 )
-from src.pipeline.state import PipelineState
+from tests.unit.conftest import make_pipeline_state as _make_state
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.test_executor"
-
-
-def _make_state(**overrides: object) -> PipelineState:
-    defaults: dict[str, object] = {
-        "pr_id": "owner/repo#42",
-        "repo": "owner/repo",
-        "repo_url": "https://github.com/owner/repo.git",
-        "commit_sha": "abc1234",
-        "diff": "",
-        "base_branch": "main",
-        "head_branch": "fix/tests",
-        "pr_author": "dev",
-    }
-    defaults.update(overrides)
-    return PipelineState(**defaults)  # type: ignore[arg-type]
 
 
 def _make_config() -> SaltaXConfig:

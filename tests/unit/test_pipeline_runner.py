@@ -18,6 +18,7 @@ from src.pipeline.runner import (
     run_pipeline,
 )
 from src.pipeline.state import PipelineState
+from tests.unit.conftest import make_pipeline_state as _make_state
 
 if TYPE_CHECKING:
     import pytest
@@ -25,21 +26,6 @@ if TYPE_CHECKING:
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.runner"
-
-
-def _make_state(**overrides: object) -> PipelineState:
-    defaults: dict[str, object] = {
-        "pr_id": "owner/repo#42",
-        "repo": "owner/repo",
-        "repo_url": "https://github.com/owner/repo.git",
-        "commit_sha": "abc12345deadbeef",
-        "diff": "diff --git a/f.py b/f.py\n+pass",
-        "base_branch": "main",
-        "head_branch": "fix/stuff",
-        "pr_author": "dev",
-    }
-    defaults.update(overrides)
-    return PipelineState(**defaults)  # type: ignore[arg-type]
 
 
 def _make_config(**overrides: Any) -> SaltaXConfig:

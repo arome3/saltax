@@ -1,0 +1,13 @@
+diff --git a/src/utils/parser.py b/src/utils/parser.py
+index 1a2b3c4..5d6e7f8 100644
+--- a/src/utils/parser.py
++++ b/src/utils/parser.py
+@@ -15,7 +15,7 @@ def parse_config(raw: str) -> dict:
+     if not raw.strip():
+         return {}
+     try:
+-        return json.loads(raw)
++        return json.loads(raw.strip())
+     except json.JSONDecodeError:
+         logger.warning("Failed to parse config: %s", raw[:50])
+         return {}

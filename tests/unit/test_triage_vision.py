@@ -11,7 +11,6 @@ from src.config import SaltaXConfig, VisionConfig
 from src.intelligence.database import IntelligenceDB
 from src.pipeline.prompts import build_analyzer_system_prompt
 from src.pipeline.stages.decision_engine import _compute_weighted_score
-from src.pipeline.state import PipelineState
 from src.triage.vision import (
     _CACHE_MAX_AGE_HOURS,
     _DOC_TYPE_PATHS,
@@ -47,23 +46,11 @@ def _vision_config(**overrides) -> VisionConfig:
     return VisionConfig(**defaults)
 
 
+from tests.unit.conftest import make_pipeline_state as _make_state
+
+
 def _make_config(**overrides) -> SaltaXConfig:
     return SaltaXConfig(**overrides)
-
-
-def _make_state(**overrides) -> PipelineState:
-    defaults: dict = {
-        "pr_id": "owner/repo#1",
-        "repo": "owner/repo",
-        "repo_url": "https://github.com/owner/repo.git",
-        "commit_sha": "abc12345",
-        "diff": "diff",
-        "base_branch": "main",
-        "head_branch": "feat/x",
-        "pr_author": "dev",
-    }
-    defaults.update(overrides)
-    return PipelineState(**defaults)
 
 
 def _make_ai_analysis(**overrides) -> dict:

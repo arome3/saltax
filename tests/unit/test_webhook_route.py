@@ -64,7 +64,7 @@ def _pr_payload(
             "title": "Fix typo",
             "body": "Fixes a small typo",
             "user": {"login": "octocat", "id": 1},
-            "head": {"sha": "abc123", "ref": "fix-typo"},
+            "head": {"sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "ref": "fix-typo"},
             "base": {"ref": "main"},
             "diff_url": "https://github.com/owner/repo/pull/42.diff",
             "labels": [{"name": "bug"}],
@@ -270,3 +270,94 @@ class TestEdgeCases:
         )
         assert response.status_code == 400
         assert "Invalid JSON" in response.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Extended Edge Cases (Doc 27)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestDoc27EdgeCases:
+    """Additional edge cases added by Doc 27 testing strategy."""
+
+    async def test_pr_draft_ignored(self, client: AsyncClient) -> None:
+        """Draft PR opened → returns 200 but pipeline not triggered (draft is just a field)."""
+        payload = _pr_payload(action="opened", draft=True)
+        body = json.dumps(payload).encode()
+        response = await client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": _sign(body),
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "doc27-draft-1",
+                "Content-Type": "application/json",
+            },
+        )
+        # Route returns 200 regardless — draft filtering happens in handler
+        assert response.status_code == 200
+
+    async def test_empty_body_returns_error(self, client: AsyncClient) -> None:
+        """Empty POST body with valid signature for empty bytes."""
+        body = b""
+        response = await client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": _sign(body),
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": "doc27-empty-1",
+                "Content-Type": "application/json",
+            },
+        )
+        # Empty body is not valid JSON
+        assert response.status_code == 400
+
+    async def test_duplicate_delivery_deduped(self, client: AsyncClient) -> None:
+        """Same X-GitHub-Delivery ID twice → second request returns 200 but is a no-op."""
+        payload = _pr_payload()
+        body = json.dumps(payload).encode()
+        delivery_id = "doc27-dedup-unique-1"
+
+        # First request
+        r1 = await client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": _sign(body),
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": delivery_id,
+                "Content-Type": "application/json",
+            },
+        )
+        assert r1.status_code == 200
+
+        # Second request with same delivery ID
+        r2 = await client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": _sign(body),
+                "X-GitHub-Event": "pull_request",
+                "X-GitHub-Delivery": delivery_id,
+                "Content-Type": "application/json",
+            },
+        )
+        assert r2.status_code == 200
+        assert r2.text == "OK"  # dedup returns "OK"
+
+    async def test_deployment_event_passthrough(self, client: AsyncClient) -> None:
+        """event=deployment → 200 passthrough, not an error."""
+        body = json.dumps({"deployment": {"id": 1}}).encode()
+        response = await client.post(
+            "/webhook/github",
+            content=body,
+            headers={
+                "X-Hub-Signature-256": _sign(body),
+                "X-GitHub-Event": "deployment",
+                "X-GitHub-Delivery": "doc27-deploy-1",
+                "Content-Type": "application/json",
+            },
+        )
+        assert response.status_code == 200
+        assert "not handled" in response.text

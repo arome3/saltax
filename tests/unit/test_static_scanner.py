@@ -23,27 +23,12 @@ from src.pipeline.stages.static_scanner import (
     _should_short_circuit,
     run_static_scan,
 )
-from src.pipeline.state import PipelineState
 from src.security import validate_branch_name, validate_clone_url
+from tests.unit.conftest import make_pipeline_state as _make_state
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.static_scanner"
-
-
-def _make_state(**overrides: object) -> PipelineState:
-    defaults: dict[str, object] = {
-        "pr_id": "owner/repo#42",
-        "repo": "owner/repo",
-        "repo_url": "https://github.com/owner/repo.git",
-        "commit_sha": "abc1234",
-        "diff": "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n",
-        "base_branch": "main",
-        "head_branch": "fix/vuln",
-        "pr_author": "dev",
-    }
-    defaults.update(overrides)
-    return PipelineState(**defaults)  # type: ignore[arg-type]
 
 
 def _make_config() -> SaltaXConfig:

@@ -78,3 +78,25 @@ triage:
     review_type: "COMMENT"
     label_recommends_merge: "saltax-recommends-merge"
     label_recommends_reject: "saltax-recommends-reject"
+
+patrol:
+  enabled: false
+  interval_seconds: 21600
+  max_concurrent_repos: 3
+  dependency_audit:
+    enabled: true
+    severity_threshold: "HIGH"
+    auto_patch: true
+    bounty_for_breaking: true
+  codebase_scan:
+    enabled: true
+    semgrep_config: "auto"
+    rescan_interval_hours: 168
+  bounty_assignment:
+    enabled: true
+    severity_to_label:
+      CRITICAL: "bounty-xl"
+      HIGH: "bounty-lg"
+      MEDIUM: "bounty-md"
+      LOW: "bounty-sm"
+    max_open_bounties_per_repo: 10

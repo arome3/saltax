@@ -121,3 +121,15 @@ def neutralize_xml_closing_tags(text: str) -> str:
         return f"&lt;/{m.group(1)}&gt;"
 
     return _XML_CLOSING_TAG_RE.sub(_escape, text)
+
+
+def neutralize_injection_patterns(text: str) -> str:
+    """Replace matched injection pattern spans with a safe placeholder.
+
+    Unlike :func:`detect_injection_markers` which only *detects*, this
+    function actively *removes* the offending spans from *text*.
+    """
+    result = text
+    for pattern in _INJECTION_PATTERNS.values():
+        result = pattern.sub("[injection pattern removed]", result)
+    return result

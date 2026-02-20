@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 _MAX_FINDINGS_DISPLAYED = 20
 
 
-def _escape_cell(value: str) -> str:
+def escape_cell(value: str) -> str:
     """Escape characters that break Markdown table cells."""
     return value.replace("|", "\\|").replace("\n", " ").replace("\r", "")
 
@@ -47,7 +47,7 @@ def format_pipeline_result(verdict: Verdict, findings: list[Finding]) -> str:
         for f in displayed:
             lines.append(
                 f"| {f.severity.value} | {f.category.value} | "
-                f"`{_escape_cell(f.file_path)}:{f.line_start}` | {_escape_cell(f.message)} |"
+                f"`{escape_cell(f.file_path)}:{f.line_start}` | {escape_cell(f.message)} |"
             )
         if len(findings) > _MAX_FINDINGS_DISPLAYED:
             lines.append(
@@ -106,60 +106,11 @@ def format_ranking_update(
             pr_label += " (recommended)"
 
         lines.append(
-            f"| {i} | {_escape_cell(str(pr_label))} "
-            f"| {_escape_cell(str(author))} | {score_str} "
-            f"| {_escape_cell(status)} |"
+            f"| {i} | {escape_cell(str(pr_label))} "
+            f"| {escape_cell(str(author))} | {score_str} "
+            f"| {escape_cell(status)} |"
         )
 
     return "\n".join(lines)
 
 
-def format_advisory_review(
-    verdict: Verdict,
-    findings: list[Finding],
-    recommendations: list[str],
-) -> str:
-    """Format a full advisory review comment with recommendation header."""
-    lines: list[str] = [
-        f"## SaltaX Advisory Review: **{verdict.decision.value}**",
-        "",
-        f"**Composite score:** {verdict.composite_score:.2f}",
-        "",
-    ]
-
-    # Recommendations
-    if recommendations:
-        lines.append("### Recommendations")
-        lines.append("")
-        for rec in recommendations:
-            lines.append(f"- {rec}")
-        lines.append("")
-
-    # Findings
-    if findings:
-        displayed = findings[:_MAX_FINDINGS_DISPLAYED]
-        lines.extend([
-            f"### Findings ({len(findings)} total)",
-            "",
-            "| Severity | Category | File | Message |",
-            "|----------|----------|------|---------|",
-        ])
-        for f in displayed:
-            lines.append(
-                f"| {f.severity.value} | {f.category.value} | "
-                f"`{_escape_cell(f.file_path)}:{f.line_start}` | {_escape_cell(f.message)} |"
-            )
-        if len(findings) > _MAX_FINDINGS_DISPLAYED:
-            lines.append(
-                f"\n*… and {len(findings) - _MAX_FINDINGS_DISPLAYED} more findings.*"
-            )
-        lines.append("")
-
-    # Attestation footer
-    attestation_id = verdict.attestation_id or "pending"
-    lines.extend([
-        "---",
-        f"*SaltaX attestation: `{attestation_id}`*",
-    ])
-
-    return "\n".join(lines)

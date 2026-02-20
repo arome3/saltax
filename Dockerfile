@@ -37,6 +37,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY src/ ./src/
 RUN pip install ".[prod]" --no-cache-dir
+RUN pip install pip-audit --no-cache-dir
 
 # Copy TS proxy build artifacts
 COPY --from=ts-builder /app/github-proxy/dist ./github-proxy/dist

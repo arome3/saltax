@@ -86,12 +86,14 @@ class TestSchemaCreation:
     """Verify DB schema is created correctly."""
 
     async def test_all_tables_exist(self, intel_db: IntelligenceDB) -> None:
-        """All 11 expected tables should be present."""
+        """All 16 expected tables should be present."""
         expected = {
             "schema_version", "vulnerability_patterns", "contributor_profiles",
             "codebase_knowledge", "pipeline_history", "attestation_store",
             "active_bounties", "verification_windows", "pr_embeddings",
-            "vision_documents", "ranking_updates",
+            "vision_documents", "ranking_updates", "issue_embeddings",
+            "backfill_progress",
+            "patrol_history", "known_vulnerabilities", "patrol_patches",
         }
         db = intel_db._require_db()
         async with db.execute(
@@ -122,7 +124,7 @@ class TestSchemaCreation:
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 12
+        assert row[0] == 15
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1181,3 +1183,439 @@ class TestVisionScoreTrending:
         assert len(trend) == 1
         stored_goals = json.loads(trend[0]["goal_scores_json"])
         assert stored_goals == goals
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Issue embeddings (Doc 31)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# L-bis. Backfill progress (Fix #11)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestBackfillProgress:
+    """Test backfill progress save/get/upsert lifecycle."""
+
+    async def test_save_and_get_progress(self, intel_db: IntelligenceDB) -> None:
+        """Save progress, read back, verify all fields."""
+        await intel_db.save_backfill_progress(
+            repo="owner/repo",
+            mode="embedding_only",
+            status="running",
+            last_page=5,
+            processed=42,
+            failed=2,
+            skipped=10,
+        )
+        progress = await intel_db.get_backfill_progress("owner/repo", "embedding_only")
+        assert progress is not None
+        assert progress["repo"] == "owner/repo"
+        assert progress["mode"] == "embedding_only"
+        assert progress["status"] == "running"
+        assert progress["last_page"] == 5
+        assert progress["processed"] == 42
+        assert progress["failed"] == 2
+        assert progress["skipped"] == 10
+
+    async def test_upsert_on_same_repo_mode(self, intel_db: IntelligenceDB) -> None:
+        """Second save with same repo+mode overwrites values."""
+        await intel_db.save_backfill_progress(
+            repo="owner/repo",
+            mode="full:pr",
+            status="running",
+            last_page=3,
+            processed=20,
+            failed=1,
+            skipped=5,
+        )
+        await intel_db.save_backfill_progress(
+            repo="owner/repo",
+            mode="full:pr",
+            status="completed",
+            last_page=10,
+            processed=100,
+            failed=3,
+            skipped=15,
+        )
+        progress = await intel_db.get_backfill_progress("owner/repo", "full:pr")
+        assert progress is not None
+        assert progress["status"] == "completed"
+        assert progress["last_page"] == 10
+        assert progress["processed"] == 100
+
+    async def test_get_nonexistent_returns_none(self, intel_db: IntelligenceDB) -> None:
+        """No progress record → None."""
+        progress = await intel_db.get_backfill_progress("nonexistent/repo", "embedding_only")
+        assert progress is None
+
+
+class TestGetPrEmbedding:
+    """Test PR embedding retrieval used for idempotency checks."""
+
+    async def test_returns_stored_embedding(self, intel_db: IntelligenceDB) -> None:
+        """Store an embedding, then retrieve via get_pr_embedding."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_embedding(
+            pr_id="owner/repo#5",
+            repo="owner/repo",
+            pr_number=5,
+            commit_sha="deadbeef",
+            embedding_blob=emb,
+            embedding_model="text-embedding",
+        )
+        result = await intel_db.get_pr_embedding("owner/repo", 5)
+        assert result is not None
+        assert result["pr_id"] == "owner/repo#5"
+        assert result["pr_number"] == 5
+        assert result["commit_sha"] == "deadbeef"
+
+    async def test_nonexistent_returns_none(self, intel_db: IntelligenceDB) -> None:
+        """No embedding for this repo+pr_number → None."""
+        result = await intel_db.get_pr_embedding("owner/repo", 999)
+        assert result is None
+
+
+class TestIssueEmbeddings:
+    """Test issue embedding storage and retrieval."""
+
+    async def test_issue_embeddings_table_exists(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """issue_embeddings table should be present after init."""
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name='issue_embeddings'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+
+    async def test_store_and_retrieve_issue_embedding(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Round-trip: store → retrieve by repo+issue_number."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:42",
+            repo="owner/repo",
+            issue_number=42,
+            title="Bug report",
+            embedding=emb,
+            labels=["bug", "high-priority"],
+        )
+        result = await intel_db.get_issue_embedding("owner/repo", 42)
+        assert result is not None
+        assert result["issue_number"] == 42
+        assert result["title"] == "Bug report"
+        assert result["repo"] == "owner/repo"
+
+    async def test_store_replaces_on_same_issue(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """ON CONFLICT upsert updates title/embedding but preserves created_at."""
+        emb1 = vector_to_blob([1.0, 0.0, 0.0])
+        emb2 = vector_to_blob([0.0, 1.0, 0.0])
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:42",
+            repo="owner/repo",
+            issue_number=42,
+            title="Original",
+            embedding=emb1,
+        )
+
+        # Capture original created_at
+        original = await intel_db.get_issue_embedding("owner/repo", 42)
+        assert original is not None
+        original_created = original["created_at"]
+
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:42",
+            repo="owner/repo",
+            issue_number=42,
+            title="Updated",
+            embedding=emb2,
+        )
+        result = await intel_db.get_issue_embedding("owner/repo", 42)
+        assert result is not None
+        assert result["title"] == "Updated"
+
+        # created_at preserved, updated_at changed
+        assert result["created_at"] == original_created
+        assert result["updated_at"] >= original_created
+
+        # Only one row should exist
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT COUNT(*) FROM issue_embeddings WHERE repo = 'owner/repo'",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row[0] == 1
+
+    async def test_get_recent_excludes_current(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """exclude_issue parameter works correctly."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        for i in range(3):
+            await intel_db.store_issue_embedding(
+                issue_id=f"owner/repo:{i + 1}",
+                repo="owner/repo",
+                issue_number=i + 1,
+                title=f"Issue {i + 1}",
+                embedding=emb,
+            )
+        recent = await intel_db.get_recent_issue_embeddings(
+            "owner/repo", exclude_issue=2, status="open",
+        )
+        issue_numbers = {r["issue_number"] for r in recent}
+        assert 2 not in issue_numbers
+        assert 1 in issue_numbers
+        assert 3 in issue_numbers
+
+    async def test_get_recent_filters_by_status(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Only issues with matching status are returned."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:1",
+            repo="owner/repo",
+            issue_number=1,
+            title="Open issue",
+            embedding=emb,
+        )
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:2",
+            repo="owner/repo",
+            issue_number=2,
+            title="Closed issue",
+            embedding=emb,
+        )
+        await intel_db.update_issue_status("owner/repo", 2, "closed")
+
+        recent = await intel_db.get_recent_issue_embeddings(
+            "owner/repo", exclude_issue=999, status="open",
+        )
+        assert len(recent) == 1
+        assert recent[0]["issue_number"] == 1
+
+    async def test_update_issue_status(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """update_issue_status sets status to 'closed'."""
+        emb = vector_to_blob([1.0, 0.0, 0.0])
+        await intel_db.store_issue_embedding(
+            issue_id="owner/repo:42",
+            repo="owner/repo",
+            issue_number=42,
+            title="Bug",
+            embedding=emb,
+        )
+        updated = await intel_db.update_issue_status("owner/repo", 42, "closed")
+        assert updated == 1
+
+        result = await intel_db.get_issue_embedding("owner/repo", 42)
+        assert result is not None
+        assert result["status"] == "closed"
+
+    async def test_schema_version_15(self, intel_db: IntelligenceDB) -> None:
+        """Schema version should be 15 after initialization."""
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT version FROM schema_version WHERE id = 1",
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == 15
+
+
+# ── V. Patrol CRUD ───────────────────────────────────────────────────────────
+
+
+class TestPatrolCRUD:
+    """Tests for patrol-related CRUD methods."""
+
+    async def test_record_patrol_run_and_get(self, intel_db: IntelligenceDB) -> None:
+        """Record a patrol run and retrieve it."""
+        await intel_db.record_patrol_run(
+            run_id="run-001",
+            repo="owner/repo",
+            timestamp="2024-01-01T00:00:00",
+            dependency_findings_count=3,
+            code_findings_count=2,
+            patches_generated=1,
+            issues_created=1,
+            bounties_assigned_wei="100000",
+            attestation_id="att-001",
+            duration_ms=5000,
+        )
+        result = await intel_db.get_latest_patrol_run("owner/repo")
+        assert result is not None
+        assert result["id"] == "run-001"
+        assert result["dependency_findings_count"] == 3
+        assert result["attestation_id"] == "att-001"
+
+    async def test_get_latest_patrol_run_empty(self, intel_db: IntelligenceDB) -> None:
+        """No runs -> None."""
+        result = await intel_db.get_latest_patrol_run("nonexistent/repo")
+        assert result is None
+
+    async def test_count_open_patrol_bounties(self, intel_db: IntelligenceDB) -> None:
+        """Count bounties with source='patrol' only."""
+        # Pipeline bounty (should not be counted)
+        await intel_db.store_bounty(
+            bounty_id="b-pipeline",
+            repo="owner/repo",
+            issue_number=1,
+            label="bounty-sm",
+            source="pipeline",
+        )
+        # Patrol bounty (should be counted)
+        await intel_db.store_bounty(
+            bounty_id="b-patrol",
+            repo="owner/repo",
+            issue_number=2,
+            label="bounty-lg",
+            source="patrol",
+        )
+        count = await intel_db.count_open_patrol_bounties("owner/repo")
+        assert count == 1
+
+    async def test_upsert_known_vulnerability_insert_and_update(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Insert then update a known vulnerability."""
+        dedup_key = IntelligenceDB.compute_dedup_key(
+            "CVE-2023-100", "requests", "python", "<2.31.0",
+        )
+        await intel_db.upsert_known_vulnerability(
+            vuln_id="v-001",
+            cve_id="CVE-2023-100",
+            dedup_key=dedup_key,
+            package_name="requests",
+            language="python",
+            severity="HIGH",
+            affected_range="<2.31.0",
+            fixed_version="2.31.0",
+            repo="owner/repo",
+            status="open",
+            bounty_issue_number=42,
+        )
+        result = await intel_db.get_known_vulnerability("owner/repo", dedup_key)
+        assert result is not None
+        assert result["package_name"] == "requests"
+        assert result["bounty_issue_number"] == 42
+
+        # Update severity
+        await intel_db.upsert_known_vulnerability(
+            vuln_id="v-002",
+            cve_id="CVE-2023-100",
+            dedup_key=dedup_key,
+            package_name="requests",
+            language="python",
+            severity="CRITICAL",
+            affected_range="<2.31.0",
+            repo="owner/repo",
+        )
+        result = await intel_db.get_known_vulnerability("owner/repo", dedup_key)
+        assert result is not None
+        assert result["severity"] == "CRITICAL"
+        # bounty_issue_number should be preserved (COALESCE)
+        assert result["bounty_issue_number"] == 42
+
+    async def test_dedup_key_null_cve(self, intel_db: IntelligenceDB) -> None:
+        """Non-CVE findings use composite dedup_key instead of NULL cve_id."""
+        dedup_key = IntelligenceDB.compute_dedup_key(
+            None, "lodash", "node", "<=4.17.20",
+        )
+        assert dedup_key == "lodash:node:<=4.17.20"
+        await intel_db.upsert_known_vulnerability(
+            vuln_id="v-null",
+            cve_id=None,
+            dedup_key=dedup_key,
+            package_name="lodash",
+            language="node",
+            severity="HIGH",
+            affected_range="<=4.17.20",
+            repo="owner/repo",
+        )
+        result = await intel_db.get_known_vulnerability("owner/repo", dedup_key)
+        assert result is not None
+        assert result["cve_id"] is None
+        assert result["dedup_key"] == dedup_key
+
+    async def test_patrol_run_ordering(self, intel_db: IntelligenceDB) -> None:
+        """get_latest_patrol_run returns the most recent by timestamp."""
+        await intel_db.record_patrol_run(
+            run_id="run-old",
+            repo="owner/repo",
+            timestamp="2024-01-01T00:00:00",
+            dependency_findings_count=1,
+        )
+        await intel_db.record_patrol_run(
+            run_id="run-new",
+            repo="owner/repo",
+            timestamp="2024-06-01T00:00:00",
+            dependency_findings_count=5,
+        )
+        result = await intel_db.get_latest_patrol_run("owner/repo")
+        assert result is not None
+        assert result["id"] == "run-new"
+        assert result["dependency_findings_count"] == 5
+
+    async def test_finding_signatures_crud(self, intel_db: IntelligenceDB) -> None:
+        """Insert, retrieve, and dedup finding signatures."""
+        repo = "owner/repo"
+        sigs = [
+            ("sql-injection", "src/db.py", 42),
+            ("xss", "src/web.py", 10),
+        ]
+        await intel_db.upsert_finding_signatures(repo, sigs)
+        known = await intel_db.get_known_finding_signatures(repo)
+        assert ("sql-injection", "src/db.py", 42) in known
+        assert ("xss", "src/web.py", 10) in known
+        assert len(known) == 2
+
+        # Re-upsert should not create duplicates
+        await intel_db.upsert_finding_signatures(repo, sigs)
+        known2 = await intel_db.get_known_finding_signatures(repo)
+        assert len(known2) == 2
+
+    async def test_code_finding_bounty(self, intel_db: IntelligenceDB) -> None:
+        """get_code_finding_bounty returns None then value after set_finding_bounty."""
+        repo = "owner/repo"
+        await intel_db.upsert_finding_signatures(
+            repo, [("rule-1", "file.py", 10)],
+        )
+        # No bounty yet
+        result = await intel_db.get_code_finding_bounty(repo, "rule-1", "file.py", 10)
+        assert result is None
+
+        # Set bounty
+        await intel_db.set_finding_bounty(repo, "rule-1", "file.py", 10, 99)
+        result = await intel_db.get_code_finding_bounty(repo, "rule-1", "file.py", 10)
+        assert result == 99
+
+    async def test_record_patrol_patch(self, intel_db: IntelligenceDB) -> None:
+        """Record a patrol patch."""
+        await intel_db.record_patrol_patch(
+            patch_id="p-001",
+            repo="owner/repo",
+            pr_number=99,
+            cve_id="CVE-2023-100",
+            package_name="requests",
+            old_version="2.25.0",
+            new_version="2.31.0",
+            status="submitted",
+        )
+        db = intel_db._require_db()
+        async with db.execute(
+            "SELECT * FROM patrol_patches WHERE id = ?", ("p-001",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        result = dict(row)
+        assert result["pr_number"] == 99
+        assert result["package_name"] == "requests"

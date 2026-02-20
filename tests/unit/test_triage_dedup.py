@@ -370,6 +370,11 @@ class TestRunDedupCheck:
                 "embedding": stored_blob,
             },
         ])
+        intel_db.get_pr_embedding_by_pr_id = AsyncMock(return_value={
+            "pr_id": "owner/repo#10",
+            "pr_number": 10,
+            "commit_sha": "def5678",
+        })
 
         with patch(
             "src.triage.dedup.embed_diff",
@@ -436,6 +441,14 @@ class TestRunDedupCheck:
                 "embedding": ndarray_to_blob(high_vec),
             },
         ])
+        # Enrichment lookup returns metadata keyed by pr_id
+        async def _pr_lookup(pr_id):
+            lookup = {
+                "owner/repo#5": {"pr_id": "owner/repo#5", "pr_number": 5, "commit_sha": "aaa"},
+                "owner/repo#6": {"pr_id": "owner/repo#6", "pr_number": 6, "commit_sha": "bbb"},
+            }
+            return lookup.get(pr_id)
+        intel_db.get_pr_embedding_by_pr_id = AsyncMock(side_effect=_pr_lookup)
 
         with patch(
             "src.triage.dedup.embed_diff",
@@ -493,6 +506,11 @@ class TestRunDedupCheck:
                 "embedding": ndarray_to_blob(query_vec),
             },
         ])
+        intel_db.get_pr_embedding_by_pr_id = AsyncMock(return_value={
+            "pr_id": "owner/repo#10",
+            "pr_number": 10,
+            "commit_sha": "def5678",
+        })
 
         with patch(
             "src.triage.dedup.embed_diff",
@@ -566,9 +584,7 @@ class TestRunDedupCheck:
         metric_names = [call.args[0] for call in mock_metric.call_args_list]
         assert "dedup.duration_seconds" in metric_names
         assert "dedup.candidates_found" in metric_names
-        assert "dedup.embeddings_compared" in metric_names
         assert "dedup.embed_api_failed" in metric_names
-        assert "dedup.dimension_mismatches" in metric_names
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

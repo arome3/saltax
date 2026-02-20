@@ -149,6 +149,12 @@ class GitHubClient:
         self._token_cache: dict[int, tuple[str, float]] = {}
         self._token_locks: dict[int, asyncio.Lock] = {}
         self._circuit_breakers: dict[int, _CircuitBreaker] = {}
+        self._installation_id_cache: dict[str, int] = {}
+
+    @property
+    def is_connected(self) -> bool:
+        """Whether the underlying HTTP client is open and usable."""
+        return self._client is not None and not self._client.is_closed
 
     def _get_lock(self, installation_id: int) -> asyncio.Lock:
         """Return a per-installation lock, creating if needed."""
@@ -224,6 +230,7 @@ class GitHubClient:
         installation_id: int,
         accept: str | None = None,
         json_body: dict[str, Any] | None = None,
+        params: dict[str, str | int] | None = None,
     ) -> httpx.Response:
         """Send an authenticated request to the GitHub API.
 
@@ -247,6 +254,7 @@ class GitHubClient:
                     path,
                     headers=headers,
                     json=json_body,
+                    params=params,
                 )
             except httpx.TransportError as exc:
                 last_error = exc
@@ -329,6 +337,15 @@ class GitHubClient:
                 raise GitHubRateLimitError(
                     "GitHub API rate limit exceeded (403)",
                     status_code=403,
+                    response_body=body,
+                    reset_timestamp=reset_ts,
+                )
+            if response.status_code == 429:
+                retry_after = response.headers.get("Retry-After", "0")
+                reset_ts = time.time() + float(retry_after)
+                raise GitHubRateLimitError(
+                    "GitHub API secondary rate limit exceeded (429)",
+                    status_code=429,
                     response_body=body,
                     reset_timestamp=reset_ts,
                 )
@@ -420,6 +437,34 @@ class GitHubClient:
                     response_body=exc.response_body,
                 ) from exc
             raise
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def create_review(
+        self,
+        repo: str,
+        pr_number: int,
+        installation_id: int,
+        *,
+        body: str,
+        event: str,
+    ) -> dict[str, Any]:
+        """Create a pull request review.
+
+        Parameters
+        ----------
+        event:
+            ``"COMMENT"``, ``"APPROVE"``, or ``"REQUEST_CHANGES"``.
+
+        Raises :class:`GitHubError` on failure.  A 422 typically means the
+        PR is already closed or merged.
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/pulls/{pr_number}/reviews",
+            installation_id=installation_id,
+            json_body={"body": body, "event": event},
+        )
         result: dict[str, Any] = response.json()
         return result
 
@@ -606,6 +651,290 @@ class GitHubClient:
         return base64.b64decode(encoded.replace("\n", "")).decode(
             "utf-8", errors="replace",
         )
+
+    # ── Installation lookup ───────────────────────────────────────────────
+
+    async def get_repo_installation_id(self, repo: str) -> int:
+        """Look up the installation ID for a repository via JWT auth.
+
+        Uses the ``/repos/{owner}/{repo}/installation`` endpoint which
+        requires App-level JWT (not an installation token).  Result is
+        cached for the lifetime of the client.
+
+        Retries on transient network / 5xx errors (same policy as ``_request``).
+        """
+        cached = self._installation_id_cache.get(repo)
+        if cached is not None:
+            return cached
+
+        last_error: Exception | None = None
+
+        for attempt in range(1, self._max_retries + 1):
+            token_jwt = self._generate_jwt()
+            try:
+                response = await self._client.get(
+                    f"/repos/{repo}/installation",
+                    headers={
+                        "Authorization": f"Bearer {token_jwt}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+            except httpx.TransportError as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        "get_repo_installation_id network error (attempt %d/%d), "
+                        "retrying in %.1fs",
+                        attempt,
+                        self._max_retries,
+                        delay,
+                        extra={"repo": repo, "error": str(exc)},
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise GitHubError(
+                    f"Installation lookup network error after {self._max_retries} "
+                    f"retries: {exc}",
+                ) from exc
+
+            if response.status_code in _RETRYABLE_STATUS_CODES:
+                last_error = GitHubError(
+                    f"Installation lookup error {response.status_code}",
+                    status_code=response.status_code,
+                    response_body=response.text[:500],
+                )
+                if attempt < self._max_retries:
+                    delay = _RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                    logger.warning(
+                        "get_repo_installation_id %d response (attempt %d/%d), "
+                        "retrying in %.1fs",
+                        response.status_code,
+                        attempt,
+                        self._max_retries,
+                        delay,
+                        extra={"repo": repo},
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise last_error
+
+            break
+
+        if response.status_code == 404:
+            raise GitHubNotFoundError(
+                f"No installation found for {repo}",
+                status_code=404,
+                response_body=response.text[:500],
+            )
+        if response.status_code >= 400:
+            raise GitHubError(
+                f"Failed to get installation for {repo}: {response.status_code}",
+                status_code=response.status_code,
+                response_body=response.text[:500],
+            )
+        data: dict[str, Any] = response.json()
+        installation_id = int(data["id"])
+        self._installation_id_cache[repo] = installation_id
+        return installation_id
+
+    # ── Listing endpoints ────────────────────────────────────────────────
+
+    async def list_pull_requests(
+        self,
+        repo: str,
+        installation_id: int,
+        *,
+        state: str = "open",
+        sort: str = "created",
+        direction: str = "asc",
+        page: int = 1,
+        per_page: int = 100,
+    ) -> list[dict[str, Any]]:
+        """List pull requests for a repository with pagination."""
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/pulls",
+            installation_id=installation_id,
+            params={
+                "state": state,
+                "sort": sort,
+                "direction": direction,
+                "page": page,
+                "per_page": per_page,
+            },
+        )
+        result: list[dict[str, Any]] = response.json()
+        return result
+
+    async def list_issues(
+        self,
+        repo: str,
+        installation_id: int,
+        *,
+        state: str = "open",
+        sort: str = "created",
+        direction: str = "asc",
+        page: int = 1,
+        per_page: int = 100,
+        labels: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List issues for a repository with pagination.
+
+        Note: GitHub's issues API returns both issues and PRs.
+        Items with a ``pull_request`` key are PRs and should be
+        filtered by the caller if only true issues are desired.
+
+        Parameters
+        ----------
+        labels:
+            Comma-separated list of label names to filter by.
+        """
+        params: dict[str, str | int] = {
+            "state": state,
+            "sort": sort,
+            "direction": direction,
+            "page": page,
+            "per_page": per_page,
+        }
+        if labels is not None:
+            params["labels"] = labels
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/issues",
+            installation_id=installation_id,
+            params=params,
+        )
+        result: list[dict[str, Any]] = response.json()
+        return result
+
+    async def create_issue(
+        self,
+        repo: str,
+        installation_id: int,
+        *,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create an issue in a repository.
+
+        Returns the full issue object from the GitHub API.
+        """
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/issues",
+            installation_id=installation_id,
+            json_body=payload,
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def create_pull_request(
+        self,
+        repo: str,
+        installation_id: int,
+        *,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> dict[str, Any]:
+        """Create a pull request in a repository.
+
+        Returns the full PR object from the GitHub API.
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/pulls",
+            installation_id=installation_id,
+            json_body={
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+            },
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
+    # ── Git refs and contents (for branch creation / file commits) ──────
+
+    async def get_ref(
+        self,
+        repo: str,
+        installation_id: int,
+        ref: str,
+    ) -> str:
+        """Get the SHA for a git ref (e.g. ``heads/main``).
+
+        Returns the object SHA pointed to by the ref.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/git/ref/{ref}",
+            installation_id=installation_id,
+        )
+        data: dict[str, Any] = response.json()
+        return str(data["object"]["sha"])
+
+    async def create_ref(
+        self,
+        repo: str,
+        installation_id: int,
+        ref: str,
+        sha: str,
+    ) -> dict[str, Any]:
+        """Create a git ref (e.g. ``refs/heads/my-branch``).
+
+        The *ref* must be fully qualified (e.g. ``refs/heads/branch-name``).
+        """
+        response = await self._request(
+            "POST",
+            f"/repos/{repo}/git/refs",
+            installation_id=installation_id,
+            json_body={"ref": ref, "sha": sha},
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def create_or_update_contents(
+        self,
+        repo: str,
+        installation_id: int,
+        *,
+        path: str,
+        message: str,
+        content_b64: str,
+        branch: str,
+        sha: str | None = None,
+    ) -> dict[str, Any]:
+        """Create or update a file via the GitHub Contents API.
+
+        Parameters
+        ----------
+        sha:
+            The blob SHA of the file being replaced. Required for updates,
+            omit for new files.
+        """
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": content_b64,
+            "branch": branch,
+        }
+        if sha is not None:
+            payload["sha"] = sha
+        response = await self._request(
+            "PUT",
+            f"/repos/{repo}/contents/{path}",
+            installation_id=installation_id,
+            json_body=payload,
+        )
+        result: dict[str, Any] = response.json()
+        return result
 
     # ── Cleanup ──────────────────────────────────────────────────────────
 

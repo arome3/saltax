@@ -50,7 +50,7 @@ def _pr_payload(*, action: str = "opened") -> dict[str, Any]:
             "title": "Fix typo",
             "body": "Fixes a small typo",
             "user": {"login": "octocat", "id": 1},
-            "head": {"sha": "abc123", "ref": "fix-typo"},
+            "head": {"sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2", "ref": "fix-typo"},
             "base": {"ref": "main"},
             "diff_url": "https://github.com/owner/repo/pull/42.diff",
             "labels": [],
@@ -243,3 +243,95 @@ class TestReplayProtection:
 
         # Pipeline should have been called only ONCE
         pipeline_mock.run.assert_awaited_once()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Edge Cases (Doc 27)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestWebhookEdgeCases:
+    """Edge-case coverage added by Doc 27 testing strategy."""
+
+    async def test_invalid_signature_returns_401(self) -> None:
+        """Wrong HMAC secret produces a 401 — pipeline NOT called."""
+        pipeline_mock = AsyncMock()
+        app = _make_app(pipeline=pipeline_mock)
+        transport = ASGITransport(app=app)
+
+        body = json.dumps(_pr_payload()).encode()
+        wrong_sig = _sign(body, secret="wrong-secret")
+
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/webhook/github",
+                content=body,
+                headers={
+                    "X-Hub-Signature-256": wrong_sig,
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "edge-sig-1",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        assert response.status_code == 401
+        pipeline_mock.run.assert_not_awaited()
+
+    async def test_malformed_json_returns_400(self) -> None:
+        """Invalid JSON body returns 400 — pipeline NOT called."""
+        pipeline_mock = AsyncMock()
+        app = _make_app(pipeline=pipeline_mock)
+        transport = ASGITransport(app=app)
+
+        body = b"this is not json"
+
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/webhook/github",
+                content=body,
+                headers={
+                    "X-Hub-Signature-256": _sign(body),
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "edge-json-1",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        assert response.status_code == 400
+        pipeline_mock.run.assert_not_awaited()
+
+    async def test_missing_event_header_returns_unhandled(self) -> None:
+        """No X-GitHub-Event header → 200 with 'Event type not handled'."""
+        app = _make_app()
+        transport = ASGITransport(app=app)
+
+        body = json.dumps({"zen": "Test"}).encode()
+
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await c.post(
+                "/webhook/github",
+                content=body,
+                headers={
+                    "X-Hub-Signature-256": _sign(body),
+                    "X-GitHub-Delivery": "edge-noevent-1",
+                    "Content-Type": "application/json",
+                },
+            )
+
+        assert response.status_code == 200
+        assert "not handled" in response.text
+
+    async def test_unknown_event_type_returns_200(self) -> None:
+        """event=deployment → 200 passthrough (GitHub marks hooks unhealthy on 4xx)."""
+        app = _make_app()
+        transport = ASGITransport(app=app)
+
+        body = json.dumps({"deployment": {"id": 1}}).encode()
+
+        async with AsyncClient(transport=transport, base_url="http://test") as c:
+            response = await _send_webhook(
+                c, body, event="deployment", delivery_id="edge-deploy-1",
+            )
+
+        assert response.status_code == 200
+        assert "not handled" in response.text

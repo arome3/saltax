@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -27,9 +28,11 @@ class RateLimiterMiddleware:
     app:
         The next ASGI application in the stack.
     global_rpm:
-        Maximum requests per minute for all endpoints (default 60).
+        Maximum requests per minute for public endpoints (default 120).
     audit_rpm:
         Stricter limit for ``/api/v1/audit`` paths (default 10).
+    webhook_rpm:
+        Limit for ``/webhook/`` paths (default 60).
     max_ips:
         Maximum tracked IPs before LRU eviction (default 10_000).
     trusted_proxy_depth:
@@ -43,14 +46,16 @@ class RateLimiterMiddleware:
         self,
         app: ASGIApp,
         *,
-        global_rpm: int = 60,
+        global_rpm: int = 120,
         audit_rpm: int = 10,
+        webhook_rpm: int = 60,
         max_ips: int = 10_000,
         trusted_proxy_depth: int = 0,
     ) -> None:
         self.app = app
         self.global_rpm = global_rpm
         self.audit_rpm = audit_rpm
+        self.webhook_rpm = webhook_rpm
         self.max_ips = max_ips
         self.trusted_proxy_depth = trusted_proxy_depth
         self._buckets: dict[str, list[float]] = {}
@@ -63,7 +68,14 @@ class RateLimiterMiddleware:
 
         client_ip = self._resolve_client_ip(scope)
         path: str = scope.get("path", "")
-        limit = self.audit_rpm if path.startswith("/api/v1/audit") else self.global_rpm
+
+        # Path priority: /webhook/ → webhook_rpm, /api/v1/audit → audit_rpm, else → global_rpm
+        if path.startswith("/webhook/"):
+            limit = self.webhook_rpm
+        elif path.startswith("/api/v1/audit"):
+            limit = self.audit_rpm
+        else:
+            limit = self.global_rpm
 
         now = time.monotonic()
         window = 60.0
@@ -75,7 +87,8 @@ class RateLimiterMiddleware:
 
             if len(timestamps) >= limit:
                 self._buckets[client_ip] = timestamps
-                await self._send_429(send, limit)
+                retry_after = math.ceil(window - (now - timestamps[0]))
+                await self._send_429(send, limit, max(retry_after, 1))
                 return
 
             timestamps.append(now)
@@ -128,7 +141,7 @@ class RateLimiterMiddleware:
                 del self._buckets[ip]
 
     @staticmethod
-    async def _send_429(send: Send, limit: int) -> None:
+    async def _send_429(send: Send, limit: int, retry_after: int) -> None:
         """Send a 429 Too Many Requests response directly on the ASGI channel."""
         body = json.dumps({
             "status_code": 429,
@@ -142,6 +155,7 @@ class RateLimiterMiddleware:
             "headers": [
                 [b"content-type", b"application/json"],
                 [b"content-length", str(len(body)).encode()],
+                [b"retry-after", str(retry_after).encode()],
             ],
         })
         await send({

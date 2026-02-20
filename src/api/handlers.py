@@ -11,11 +11,13 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from src.github.exceptions import GitHubRateLimitError
+from src.security.input_validation import sanitize_diff
 
 if TYPE_CHECKING:
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.intelligence.database import IntelligenceDB
+    from src.intelligence.vector_index import VectorIndexManager
     from src.pipeline.runner import Pipeline
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ async def handle_pr_event(
     intel_db: IntelligenceDB,
     config: SaltaXConfig,
     env: EnvConfig | None = None,
+    vector_index_manager: VectorIndexManager | None = None,
 ) -> None:
     """Process a pull-request event through the analysis pipeline.
 
@@ -66,8 +69,9 @@ async def handle_pr_event(
                     bounty_amount_wei = int(eth_amount * 10**18)
                     break  # first matching label wins
 
-        # Fetch the diff via the GitHub client
+        # Fetch the diff via the GitHub client and sanitize at ingress
         diff = await github_client.get_pr_diff(repo, pr_number, installation_id)
+        diff = sanitize_diff(diff)
 
         # Self-modification detection
         is_self_mod = False
@@ -166,8 +170,12 @@ async def handle_pr_event(
                     run_dedup_check,
                 )
 
+                pr_vector_index = (
+                    vector_index_manager.pr_index
+                    if vector_index_manager else None
+                )
                 duplicates = await run_dedup_check(
-                    state_dict, config, env, intel_db,
+                    state_dict, config, env, intel_db, pr_vector_index,
                 )
                 state_dict["duplicate_candidates"] = duplicates
                 if duplicates and (
@@ -220,30 +228,6 @@ async def handle_pr_event(
             extra={"pr_id": pr_data["pr_id"], "action": action},
         )
 
-        # Create verification window on APPROVE verdict
-        if (
-            state.verdict
-            and str(state.verdict.get("decision", "")).upper() == "APPROVE"
-        ):
-            from src.verification.window import create_window  # noqa: PLC0415
-
-            attestation = state.attestation or {}
-            await create_window(
-                intel_db=intel_db,
-                config=config.verification,
-                pr_id=state.pr_id,
-                repo=state.repo,
-                pr_number=pr_number,
-                installation_id=installation_id,
-                attestation_id=str(attestation.get("attestation_id", "")),
-                verdict=state.verdict,
-                attestation=attestation,
-                contributor_address=state.pr_author_wallet,
-                bounty_amount_wei=state.bounty_amount_wei,
-                stake_amount_wei=state.bounty_amount_wei,
-                is_self_modification=state.is_self_modification,
-            )
-
         # ── Triage: competitive ranking ──────────────────────────
         if (
             config.triage.enabled
@@ -272,10 +256,124 @@ async def handle_pr_event(
                     extra={"pr_id": pr_data.get("pr_id")},
                 )
 
+        # ── Decision dispatch (advisory vs autonomous) ────────────
+        if config.triage.enabled and state.verdict:
+            from src.triage.advisory import dispatch_decision  # noqa: PLC0415
+
+            await dispatch_decision(
+                state, config, github_client, intel_db=intel_db,
+            )
+        elif (
+            state.verdict
+            and str(state.verdict.get("decision", "")).upper() == "APPROVE"
+        ):
+            # Triage disabled fallback — direct verification window
+            from src.verification.window import create_window  # noqa: PLC0415
+
+            attestation = state.attestation or {}
+            try:
+                await create_window(
+                    intel_db=intel_db,
+                    config=config.verification,
+                    pr_id=state.pr_id,
+                    repo=state.repo,
+                    pr_number=pr_number,
+                    installation_id=installation_id,
+                    attestation_id=str(attestation.get("attestation_id", "")),
+                    verdict=state.verdict,
+                    attestation=attestation,
+                    contributor_address=state.pr_author_wallet,
+                    bounty_amount_wei=state.bounty_amount_wei,
+                    stake_amount_wei=state.bounty_amount_wei,
+                    is_self_modification=state.is_self_modification,
+                )
+            except Exception:
+                logger.error(
+                    "Verification window creation failed (triage-disabled fallback)",
+                    exc_info=True,
+                    extra={"pr_id": state.pr_id},
+                )
+
     except Exception:
         logger.exception(
             "Unhandled error in PR event handler",
             extra={"pr_id": pr_data.get("pr_id")},
+        )
+
+
+async def handle_issue_event(
+    issue_data: dict[str, Any],
+    *,
+    github_client: GitHubClient,
+    intel_db: IntelligenceDB,
+    config: SaltaXConfig,
+    env: EnvConfig | None = None,
+    vector_index_manager: VectorIndexManager | None = None,
+) -> None:
+    """Process an issue event for deduplication.
+
+    Dispatches based on action:
+    - ``closed`` → update embedding status
+    - ``opened`` → run dedup check, post comment if duplicates found
+    - ``edited`` → re-embed if body changed, update comment
+    """
+    try:
+        action = issue_data.get("action", "")
+        repo = issue_data.get("repo", issue_data.get("repo_full_name", ""))
+        issue_number = issue_data.get("issue_number", 0)
+
+        if action == "closed":
+            try:
+                await intel_db.update_issue_status(repo, issue_number, "closed")
+            except Exception:
+                logger.warning(
+                    "Failed to update issue embedding status to closed",
+                    exc_info=True,
+                    extra={"repo": repo, "issue_number": issue_number},
+                )
+            return
+
+        # Gate: triage + issue_dedup enabled + env available
+        if env is None:
+            return
+        if not config.triage.enabled:
+            return
+        if not config.triage.issue_dedup.enabled:
+            return
+
+        issue_vector_index = (
+            vector_index_manager.issue_index
+            if vector_index_manager else None
+        )
+
+        if action == "opened":
+            from src.triage.issue_dedup import (  # noqa: PLC0415
+                post_issue_dedup_comment,
+                run_issue_dedup_check,
+            )
+
+            duplicates = await run_issue_dedup_check(
+                issue_data, config, env, intel_db, issue_vector_index,
+            )
+            if duplicates:
+                await post_issue_dedup_comment(
+                    issue_data, duplicates, github_client, config,
+                )
+
+        elif action == "edited":
+            from src.triage.issue_dedup import (  # noqa: PLC0415
+                handle_issue_edited,
+            )
+
+            await handle_issue_edited(
+                issue_data, config, env, intel_db, github_client,
+                issue_vector_index,
+            )
+
+    except Exception:
+        logger.exception(
+            "Unhandled error in issue event handler",
+            extra={"issue_number": issue_data.get("issue_number")},
         )
 
 

@@ -204,6 +204,18 @@ class AuditPricingConfig(BaseModel):
 # ── Triage sub-models ────────────────────────────────────────────────────────
 
 
+class VectorIndexConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    dimension: int = 1536
+    ef_construction: int = 200
+    m: int = 16
+    ef_search: int = 50
+    max_elements: int = 100_000
+    auto_enable_threshold: int = 2000
+
+
 class DedupConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -213,6 +225,17 @@ class DedupConfig(BaseModel):
     embedding_api_timeout_seconds: int = Field(default=30, gt=0)
     max_scan_embeddings: int = Field(default=200, ge=10, le=10000)
     comment_on_synchronize: bool = False
+
+
+class IssueDedupConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    similarity_threshold: float = Field(default=0.90, ge=0.5, le=0.99)
+    embedding_model: str = "text-embedding"
+    max_candidates: int = Field(default=500, ge=10, le=10000)
+    apply_label: bool = False
+    label_name: str = "duplicate-candidate"
 
 
 class RankingConfig(BaseModel):
@@ -247,12 +270,71 @@ class TriageConfig(BaseModel):
     enabled: bool = False
     mode: Literal["autonomous", "advisory"] = "autonomous"
     dedup: DedupConfig = Field(default_factory=DedupConfig)
+    issue_dedup: IssueDedupConfig = Field(default_factory=IssueDedupConfig)
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     advisory: AdvisoryConfig = Field(default_factory=AdvisoryConfig)
 
 
 # ── Agent ────────────────────────────────────────────────────────────────────
+
+
+class DependencyAuditConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    severity_threshold: str = "HIGH"
+    auto_patch: bool = True
+    bounty_for_breaking: bool = True
+
+
+class CodebaseScanConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    semgrep_config: str = "auto"
+    rescan_interval_hours: int = Field(default=168, gt=0)
+
+
+class BountyAssignmentConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    severity_to_label: dict[str, str] = Field(
+        default_factory=lambda: {
+            "CRITICAL": "bounty-xl",
+            "HIGH": "bounty-lg",
+            "MEDIUM": "bounty-md",
+            "LOW": "bounty-sm",
+        }
+    )
+    max_open_bounties_per_repo: int = Field(default=10, ge=1)
+
+
+class PatrolConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    interval_seconds: int = Field(default=21600, gt=0)
+    max_concurrent_repos: int = Field(default=3, ge=1)
+    dependency_audit: DependencyAuditConfig = Field(default_factory=DependencyAuditConfig)
+    codebase_scan: CodebaseScanConfig = Field(default_factory=CodebaseScanConfig)
+    bounty_assignment: BountyAssignmentConfig = Field(default_factory=BountyAssignmentConfig)
+
+
+# ── Backfill ────────────────────────────────────────────────────────────────
+
+
+class BackfillConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    per_page: int = Field(default=100, ge=1, le=100)
+    page_delay_seconds: float = Field(default=1.0, ge=0.0)
+    concurrency: int = Field(default=3, ge=1, le=10)
+    batch_save_interval: int = Field(default=10, ge=1)
+    max_failures_before_abort: int = Field(default=50, ge=1)
+    rate_limit_max_wait_seconds: int = Field(default=3600, ge=60)
+    default_mode: str = "full"
 
 
 class AgentConfig(BaseModel):
@@ -280,7 +362,10 @@ class SaltaXConfig(BaseModel):
     staking: StakingConfig = Field(default_factory=StakingConfig)
     disputes: DisputeConfig = Field(default_factory=DisputeConfig)
     audit_pricing: AuditPricingConfig = Field(default_factory=AuditPricingConfig)
+    vector_index: VectorIndexConfig = Field(default_factory=VectorIndexConfig)
     triage: TriageConfig = Field(default_factory=TriageConfig)
+    backfill: BackfillConfig = Field(default_factory=BackfillConfig)
+    patrol: PatrolConfig = Field(default_factory=PatrolConfig)
 
     @model_validator(mode="before")
     @classmethod
@@ -440,5 +525,25 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             errors.append(
                 f"triage.vision.document_types: unknown type {dt!r}"
             )
+
+    # 11. Patrol bounty labels should reference known bounty labels
+    if cfg.patrol.enabled and cfg.patrol.bounty_assignment.enabled:
+        for severity, label in cfg.patrol.bounty_assignment.severity_to_label.items():
+            if label not in cfg.bounties.labels:
+                errors.append(
+                    f"patrol.bounty_assignment.severity_to_label[{severity!r}] "
+                    f"references unknown bounty label {label!r}"
+                )
+
+    # 12. Patrol enabled but no sub-scan enabled
+    if (
+        cfg.patrol.enabled
+        and not cfg.patrol.dependency_audit.enabled
+        and not cfg.patrol.codebase_scan.enabled
+    ):
+        errors.append(
+            "patrol.enabled is True but both dependency_audit and "
+            "codebase_scan are disabled — patrol has nothing to scan"
+        )
 
     return errors

@@ -10,26 +10,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.conftest import REQUIRED_ENV_VARS, VALID_YAML
-
 from src.main import (
     TSProxyManager,
-    _configure_logging,
     _graceful_shutdown,
     _teardown,
     bootstrap,
 )
-
+from src.observability import configure_logging
+from tests.conftest import REQUIRED_ENV_VARS, VALID_YAML
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# A. _configure_logging
+# A. configure_logging
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 class TestConfigureLogging:
     def test_installs_json_handler(self) -> None:
-        """After _configure_logging(), root logger has a JSON-formatted handler."""
-        _configure_logging()
+        """After configure_logging(), root logger has a JSON-formatted handler."""
+        configure_logging()
         root = logging.getLogger()
         assert len(root.handlers) == 1
         handler = root.handlers[0]
@@ -39,22 +37,22 @@ class TestConfigureLogging:
     def test_reads_env_var_log_level(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SALTAX_LOG_LEVEL env var sets the root logger level."""
         monkeypatch.setenv("SALTAX_LOG_LEVEL", "DEBUG")
-        _configure_logging()
+        configure_logging()
         assert logging.getLogger().level == logging.DEBUG
 
     def test_defaults_to_info(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Without SALTAX_LOG_LEVEL, root logger defaults to INFO."""
         monkeypatch.delenv("SALTAX_LOG_LEVEL", raising=False)
-        _configure_logging()
+        configure_logging()
         assert logging.getLogger().level == logging.INFO
 
     def test_clears_existing_handlers(self) -> None:
-        """Calling _configure_logging() replaces any existing root handlers."""
+        """Calling configure_logging() replaces any existing root handlers."""
         root = logging.getLogger()
         root.addHandler(logging.StreamHandler())
         root.addHandler(logging.StreamHandler())
         assert len(root.handlers) >= 2
-        _configure_logging()
+        configure_logging()
         assert len(root.handlers) == 1
 
 

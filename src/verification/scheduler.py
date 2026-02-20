@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from src.github.client import GitHubClient
     from src.intelligence.database import IntelligenceDB
     from src.intelligence.sealing import KMSSealManager
+    from src.observability.metrics import BudgetTracker
     from src.treasury.manager import TreasuryManager
 
 logger = logging.getLogger(__name__)
@@ -61,12 +63,14 @@ class VerificationScheduler:
         github_client: GitHubClient,
         treasury_mgr: TreasuryManager,
         kms: KMSSealManager | None = None,
+        budget_tracker: BudgetTracker | None = None,
     ) -> None:
         self._config = config
         self._intel_db = intel_db
         self._github_client = github_client
         self._treasury_mgr = treasury_mgr
         self._kms = kms
+        self._budget_tracker = budget_tracker
         self._stop_event = asyncio.Event()
 
     @property
@@ -149,6 +153,16 @@ class VerificationScheduler:
 
     async def _tick(self) -> None:
         """Process expired open windows and stale challenged windows."""
+        ctx = (
+            self._budget_tracker.track("verification_tick")
+            if self._budget_tracker
+            else nullcontext()
+        )
+        async with ctx:
+            return await self._tick_impl()
+
+    async def _tick_impl(self) -> None:
+        """Inner tick logic, separated for budget tracking."""
         now = datetime.now(UTC)
         now_iso = now.isoformat()
         expired = await self._intel_db.get_expired_open_windows(now_iso)

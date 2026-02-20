@@ -6,6 +6,7 @@ import asyncio
 import dataclasses
 import logging
 import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
     from src.attestation.engine import AttestationEngine
     from src.config import EnvConfig, SaltaXConfig
     from src.intelligence.database import IntelligenceDB
+    from src.observability.metrics import BudgetTracker
 
 logger = logging.getLogger(__name__)
 
@@ -251,20 +253,24 @@ class Pipeline:
         env: EnvConfig,
         intel_db: IntelligenceDB,
         attestation_engine: AttestationEngine,
+        budget_tracker: BudgetTracker | None = None,
     ) -> None:
         self._config = config
         self._env = env
         self._intel_db = intel_db
         self._attestation_engine = attestation_engine
+        self._budget_tracker = budget_tracker
 
     async def run(self, pr_data: dict[str, Any]) -> PipelineState:
         """Build a :class:`PipelineState` from *pr_data* and execute the pipeline."""
         filtered = {k: v for k, v in pr_data.items() if k in _PIPELINE_STATE_FIELDS}
         state = PipelineState(**filtered)
-        return await run_pipeline(
-            state, self._config, self._env, self._intel_db,
-            self._attestation_engine,
-        )
+        ctx = self._budget_tracker.track("full_pipeline") if self._budget_tracker else nullcontext()
+        async with ctx:
+            return await run_pipeline(
+                state, self._config, self._env, self._intel_db,
+                self._attestation_engine,
+            )
 
 
 def build_pipeline(
@@ -272,6 +278,7 @@ def build_pipeline(
     env: EnvConfig,
     intel_db: IntelligenceDB,
     attestation_engine: AttestationEngine,
+    budget_tracker: BudgetTracker | None = None,
 ) -> Pipeline:
     """Construct a fully-wired pipeline from configuration."""
-    return Pipeline(config, env, intel_db, attestation_engine)
+    return Pipeline(config, env, intel_db, attestation_engine, budget_tracker=budget_tracker)

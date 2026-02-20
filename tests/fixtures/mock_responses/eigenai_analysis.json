@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1708000000,
+  "model": "gpt-oss-120b-f16",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"quality_score\":8.5,\"risk_score\":2.0,\"confidence\":0.92,\"concerns\":[],\"recommendations\":[\"Add a unit test for the empty-input edge case\"],\"architectural_fit\":\"good\",\"findings\":[],\"reasoning\":\"Clean single-file bugfix with proper null-check. No security concerns.\"}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1200,
+    "completion_tokens": 85,
+    "total_tokens": 1285
+  },
+  "system_fingerprint": "fp_abc123def456"
+}

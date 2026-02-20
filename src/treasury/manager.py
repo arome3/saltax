@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -18,6 +19,7 @@ from web3 import AsyncWeb3
 if TYPE_CHECKING:
     from src.config import BountyConfig, TreasuryConfig
     from src.intelligence.database import IntelligenceDB
+    from src.observability.metrics import BudgetTracker
     from src.treasury.policy import PayoutRequest, TreasuryPolicy
     from src.treasury.wallet import WalletManager
 
@@ -70,12 +72,14 @@ class TreasuryManager:
         intel_db: IntelligenceDB,
         treasury_config: TreasuryConfig,
         bounty_config: BountyConfig,
+        budget_tracker: BudgetTracker | None = None,
     ) -> None:
         self._wallet = wallet
         self._policy = policy
         self._intel_db = intel_db
         self._treasury_config = treasury_config
         self._bounty_config = bounty_config
+        self._budget_tracker = budget_tracker
         self._payout_lock = asyncio.Lock()
         self._tx_count: int = 0
         self._revenue_by_currency: dict[str, int] = {}  # currency → total atomic
@@ -129,7 +133,12 @@ class TreasuryManager:
         Raises ``ValueError`` if policy rejects.
         Raises ``RuntimeError`` if wallet not initialized.
         """
-        async with self._payout_lock:
+        ctx = (
+            self._budget_tracker.track("treasury_payout")
+            if self._budget_tracker
+            else nullcontext()
+        )
+        async with ctx, self._payout_lock:
             balance = await self._wallet.get_balance()
 
             ok, reason = self._policy.validate_payout(request, balance)

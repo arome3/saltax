@@ -25,6 +25,17 @@ class KMSSealManager:
     def endpoint(self) -> str:
         return self._endpoint
 
+    @property
+    def is_available(self) -> bool:
+        """Whether the KMS client is usable for health checking.
+
+        Returns ``True`` when the client has not yet been created (lazy
+        initialization — not yet needed, healthy by default).
+        """
+        if self._client is None:
+            return True
+        return not self._client.is_closed
+
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=30.0)

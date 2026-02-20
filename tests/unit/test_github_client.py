@@ -30,6 +30,7 @@ from src.github.exceptions import (
     GitHubError,
     GitHubMergeConflictError,
     GitHubNotFoundError,
+    GitHubRateLimitError,
 )
 
 # ── Test RSA key (generated once at module level) ────────────────────────────
@@ -551,6 +552,153 @@ class TestCircuitBreaker:
 
         with pytest.raises(GitHubError, match="Circuit breaker open"):
             await github_client.get_pr_diff("owner/repo", 1, _TEST_INSTALLATION_ID)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Get Repo Installation ID
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestGetRepoInstallationId:
+    async def test_success_returns_installation_id(
+        self, github_client: GitHubClient,
+    ) -> None:
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.get("/repos/owner/repo/installation").mock(
+                return_value=httpx.Response(200, json={"id": 42}),
+            )
+            result = await github_client.get_repo_installation_id("owner/repo")
+            assert result == 42
+
+    async def test_caches_result_on_second_call(
+        self, github_client: GitHubClient,
+    ) -> None:
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            route = mock.get("/repos/owner/repo/installation").mock(
+                return_value=httpx.Response(200, json={"id": 42}),
+            )
+            first = await github_client.get_repo_installation_id("owner/repo")
+            second = await github_client.get_repo_installation_id("owner/repo")
+            assert first == second == 42
+            assert route.call_count == 1  # only one HTTP call
+
+    async def test_404_raises_not_found(
+        self, github_client: GitHubClient,
+    ) -> None:
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.get("/repos/owner/missing/installation").mock(
+                return_value=httpx.Response(404, json={"message": "Not Found"}),
+            )
+            with pytest.raises(GitHubNotFoundError, match="No installation"):
+                await github_client.get_repo_installation_id("owner/missing")
+
+    async def test_retry_on_transport_error(
+        self, github_client: GitHubClient,
+    ) -> None:
+        """Transient network error retries then succeeds."""
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            route = mock.get("/repos/owner/repo/installation")
+            route.side_effect = [
+                httpx.ConnectError("Connection refused"),
+                httpx.Response(200, json={"id": 77}),
+            ]
+            result = await github_client.get_repo_installation_id("owner/repo")
+            assert result == 77
+            assert route.call_count == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# List Pull Requests
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestListPullRequests:
+    async def test_returns_pr_list(self, github_client: GitHubClient) -> None:
+        prs = [{"number": 1}, {"number": 2}]
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.post(url__regex=r"/app/installations/.*/access_tokens").mock(
+                return_value=_mock_token_response(),
+            )
+            mock.get("/repos/owner/repo/pulls").mock(
+                return_value=httpx.Response(200, json=prs),
+            )
+            result = await github_client.list_pull_requests(
+                "owner/repo", _TEST_INSTALLATION_ID,
+            )
+            assert result == prs
+
+    async def test_passes_query_params(self, github_client: GitHubClient) -> None:
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.post(url__regex=r"/app/installations/.*/access_tokens").mock(
+                return_value=_mock_token_response(),
+            )
+            route = mock.get("/repos/owner/repo/pulls").mock(
+                return_value=httpx.Response(200, json=[]),
+            )
+            await github_client.list_pull_requests(
+                "owner/repo",
+                _TEST_INSTALLATION_ID,
+                state="closed",
+                sort="updated",
+                direction="desc",
+                page=3,
+                per_page=50,
+            )
+            sent = route.calls[0].request
+            assert sent.url.params["state"] == "closed"
+            assert sent.url.params["sort"] == "updated"
+            assert sent.url.params["direction"] == "desc"
+            assert sent.url.params["page"] == "3"
+            assert sent.url.params["per_page"] == "50"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# List Issues
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestListIssues:
+    async def test_returns_issue_list(self, github_client: GitHubClient) -> None:
+        issues = [{"number": 10, "title": "Bug"}]
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.post(url__regex=r"/app/installations/.*/access_tokens").mock(
+                return_value=_mock_token_response(),
+            )
+            mock.get("/repos/owner/repo/issues").mock(
+                return_value=httpx.Response(200, json=issues),
+            )
+            result = await github_client.list_issues(
+                "owner/repo", _TEST_INSTALLATION_ID,
+            )
+            assert result == issues
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 429 Rate Limit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRateLimitHandling429:
+    async def test_429_raises_rate_limit_error_with_retry_after(
+        self, github_client: GitHubClient,
+    ) -> None:
+        """A 429 response should raise GitHubRateLimitError with reset_timestamp."""
+        with respx.mock(base_url=_GITHUB_API_BASE) as mock:
+            mock.post(url__regex=r"/app/installations/.*/access_tokens").mock(
+                return_value=_mock_token_response(),
+            )
+            mock.get("/repos/owner/repo/pulls/1").mock(
+                return_value=httpx.Response(
+                    429,
+                    json={"message": "secondary rate limit"},
+                    headers={"Retry-After": "60"},
+                ),
+            )
+            with pytest.raises(GitHubRateLimitError) as exc_info:
+                await github_client.get_pr_diff("owner/repo", 1, _TEST_INSTALLATION_ID)
+
+            # reset_timestamp = time.time() + float(Retry-After)
+            assert exc_info.value.reset_timestamp > time.time()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

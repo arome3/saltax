@@ -17,11 +17,13 @@ from src.api.routes.audit import router as audit_router
 from src.api.routes.bounties import router as bounties_router
 from src.api.routes.challenge import router as challenge_router
 from src.api.routes.dispute import router as dispute_router
+from src.api.routes.health import router as health_router
 from src.api.routes.identity import router as identity_router
 from src.api.routes.intelligence import router as intelligence_router
 from src.api.routes.status import router as status_router
 from src.api.routes.vision import router as vision_router
 from src.api.routes.webhook import router as webhook_router
+from src.security.errors import DegradedError, SaltaXError, SecurityError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -34,6 +36,9 @@ if TYPE_CHECKING:
     from src.identity.registration import IdentityRegistrar
     from src.identity.reputation import ReputationManager
     from src.intelligence.database import IntelligenceDB
+    from src.intelligence.sealing import KMSSealManager
+    from src.intelligence.vector_index import VectorIndexManager
+    from src.observability.metrics import BudgetTracker
     from src.pipeline.runner import Pipeline
     from src.treasury.manager import TreasuryManager
     from src.treasury.wallet import WalletManager
@@ -56,6 +61,9 @@ def create_app(
     tx_store: TxHashStore | None = None,
     reputation_mgr: ReputationManager | None = None,
     dispute_router_inst: DisputeRouter | None = None,
+    kms: KMSSealManager | None = None,
+    budget_tracker: BudgetTracker | None = None,
+    vector_index_manager: VectorIndexManager | None = None,
 ) -> FastAPI:
     """Build the FastAPI application with all dependencies wired to ``app.state``."""
 
@@ -85,12 +93,26 @@ def create_app(
     app.state.tx_store = tx_store
     app.state.reputation_mgr = reputation_mgr
     app.state.dispute_router = dispute_router_inst
+    app.state.budget_tracker = budget_tracker
+    app.state.vector_index_manager = vector_index_manager
+
+    # ── Component health checker ─────────────────────────────────────
+    if kms is not None:
+        from src.observability.health import ComponentHealthChecker  # noqa: PLC0415
+
+        app.state.health_checker = ComponentHealthChecker(
+            intel_db=intel_db,
+            github_client=github_client,
+            wallet=wallet,
+            scheduler=scheduler,
+            kms=kms,
+        )
 
     # ── Global exception handlers ────────────────────────────────────
     _register_exception_handlers(app)
 
     # ── Middleware (rate limiter runs first for all requests) ─────────
-    app.add_middleware(RateLimiterMiddleware, global_rpm=60, audit_rpm=10)
+    app.add_middleware(RateLimiterMiddleware, global_rpm=120, audit_rpm=10, webhook_rpm=60)
 
     # ── Routers ──────────────────────────────────────────────────────
     app.include_router(webhook_router)
@@ -101,6 +123,7 @@ def create_app(
     app.include_router(challenge_router, prefix="/api/v1")
     app.include_router(dispute_router, prefix="/api/v1")
     app.include_router(identity_router, prefix="/api/v1")
+    app.include_router(health_router, prefix="/api/v1")
     app.include_router(intelligence_router, prefix="/api/v1")
     app.include_router(vision_router, prefix="/api/v1")
 
@@ -150,6 +173,41 @@ def _register_exception_handlers(app: FastAPI) -> None:
                 "status_code": 422,
                 "error": "Unprocessable Entity",
                 "detail": str(exc.errors()),
+            },
+        )
+
+    @app.exception_handler(SaltaXError)
+    async def saltax_error_handler(
+        request: Request,
+        exc: SaltaXError,
+    ) -> JSONResponse:
+        if isinstance(exc, DegradedError):
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status_code": 200,
+                    "detail": str(exc) or "Operating in degraded mode",
+                },
+                headers={"X-SaltaX-Degraded": "true"},
+            )
+        if isinstance(exc, SecurityError):
+            # No detail to prevent oracle attacks
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "status_code": 403,
+                    "error": "Forbidden",
+                    "detail": "Forbidden",
+                },
+            )
+        # All other SaltaXError subclasses — use their http_status
+        status = exc.http_status
+        return JSONResponse(
+            status_code=status,
+            content={
+                "status_code": status,
+                "error": _status_phrase(status),
+                "detail": str(exc) or "An error occurred",
             },
         )
 

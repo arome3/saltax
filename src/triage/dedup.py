@@ -21,16 +21,14 @@ from openai import (
     RateLimitError,
 )
 
-from src.intelligence.similarity import (
-    blob_to_ndarray,
-    cosine_similarity_vectors,
-    ndarray_to_blob,
-)
+from src.intelligence.similarity import ndarray_to_blob
+from src.intelligence.vector_index import find_similar
 
 if TYPE_CHECKING:
     from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.intelligence.database import IntelligenceDB
+    from src.intelligence.vector_index import VectorIndex
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +120,7 @@ async def run_dedup_check(
     config: SaltaXConfig,
     env: EnvConfig,
     intel_db: IntelligenceDB,
+    vector_index: VectorIndex | None = None,
 ) -> list[dict[str, Any]]:
     """Run the full dedup check for a PR.
 
@@ -138,7 +137,6 @@ async def run_dedup_check(
     """
     t0 = time.monotonic()
     embed_failed = 0
-    mismatch_count = 0
 
     # 1. Gate: triage and dedup must both be enabled
     if not config.triage.enabled:
@@ -188,57 +186,53 @@ async def run_dedup_check(
             extra={"pr_id": pr_id},
         )
 
-    # 5. Fetch recent embeddings (excluding the current PR, model-filtered)
+    # Dual-write: keep HNSW index warm
+    if vector_index is not None:
+        try:
+            vector_index.add(pr_id, query_vec)
+        except (ValueError, MemoryError):
+            logger.debug("Failed to add embedding to vector index", exc_info=True)
+
+    # 5. Find similar embeddings (HNSW if available, brute-force fallback)
+    threshold = config.triage.dedup.similarity_threshold
     try:
-        recent = await intel_db.get_recent_embeddings(
+        raw_matches = await find_similar(
+            query_vec,
+            entity_type="pr",
             repo=repo,
-            exclude_pr_number=pr_number,
-            limit=config.triage.dedup.max_scan_embeddings,
+            exclude_id=pr_id,
+            threshold=threshold,
+            limit=20,
+            intel_db=intel_db,
+            vector_index=vector_index,
+            exclude_number=pr_number,
             embedding_model=config.triage.dedup.embedding_model,
+            max_scan=config.triage.dedup.max_scan_embeddings,
         )
     except Exception:
         logger.exception(
-            "Failed to fetch recent embeddings",
+            "Failed to find similar embeddings",
             extra={"pr_id": pr_id},
         )
         return []
 
-    # 6. Compare and filter
-    threshold = config.triage.dedup.similarity_threshold
+    # 6. Enrich matches with PR metadata
     candidates: list[dict[str, Any]] = []
-
-    for row in recent:
-        try:
-            stored_vec = blob_to_ndarray(row["embedding"])
-            sim = cosine_similarity_vectors(query_vec, stored_vec)
-        except ValueError:
-            mismatch_count += 1
-            logger.debug(
-                "Skipping embedding comparison due to dimension mismatch",
-                extra={
-                    "pr_id": pr_id,
-                    "other_pr": row.get("pr_id"),
-                },
-            )
-            continue
-
-        if sim >= threshold:
+    for match in raw_matches:
+        row = await intel_db.get_pr_embedding_by_pr_id(match["id"])
+        if row:
             candidates.append({
-                "pr_id": row["pr_id"],
+                "pr_id": match["id"],
                 "pr_number": row["pr_number"],
                 "commit_sha": row["commit_sha"],
-                "similarity": round(sim, 4),
+                "similarity": match["similarity"],
             })
-
-    candidates.sort(key=lambda c: c["similarity"], reverse=True)
 
     # 7. Emit metrics
     elapsed = time.monotonic() - t0
     _emit_metric("dedup.duration_seconds", round(elapsed, 3), pr_id=pr_id)
     _emit_metric("dedup.candidates_found", len(candidates), pr_id=pr_id, repo=repo)
-    _emit_metric("dedup.embeddings_compared", len(recent), pr_id=pr_id)
     _emit_metric("dedup.embed_api_failed", embed_failed, pr_id=pr_id)
-    _emit_metric("dedup.dimension_mismatches", mismatch_count, pr_id=pr_id)
 
     return candidates
 

@@ -7,6 +7,7 @@ tracks ``X-GitHub-Delivery`` IDs with a TTL to reject duplicates.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 
@@ -30,32 +31,35 @@ class DeliveryDedup:
         self._ttl = ttl_seconds
         self._max_entries = max_entries
         self._seen: dict[str, float] = {}
+        self._lock = asyncio.Lock()
 
-    def is_duplicate(self, delivery_id: str) -> bool:
+    async def is_duplicate(self, delivery_id: str) -> bool:
         """Return True if this delivery ID was already processed.
 
-        Also registers the ID for future checks and prunes expired entries.
+        Uses ``asyncio.Lock`` to make the read-check-write atomic,
+        preventing TOCTOU races across concurrent webhook requests.
         """
         if not delivery_id or delivery_id == "unknown":
             # Missing delivery ID — can't dedup, allow through
             return False
 
-        now = time.monotonic()
-        self._prune(now)
+        async with self._lock:
+            now = time.monotonic()
+            self._prune(now)
 
-        if delivery_id in self._seen:
-            return True
+            if delivery_id in self._seen:
+                return True
 
-        self._seen[delivery_id] = now
+            self._seen[delivery_id] = now
 
-        # Enforce cap *after* insertion so the new entry is included
-        if len(self._seen) > self._max_entries:
-            by_age = sorted(self._seen.items(), key=lambda kv: kv[1])
-            to_drop = len(self._seen) - self._max_entries
-            for did, _ in by_age[:to_drop]:
-                del self._seen[did]
+            # Enforce cap *after* insertion so the new entry is included
+            if len(self._seen) > self._max_entries:
+                by_age = sorted(self._seen.items(), key=lambda kv: kv[1])
+                to_drop = len(self._seen) - self._max_entries
+                for did, _ in by_age[:to_drop]:
+                    del self._seen[did]
 
-        return False
+            return False
 
     def _prune(self, now: float) -> None:
         """Remove expired entries and enforce max_entries cap."""

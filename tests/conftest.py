@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
 from src.config import EnvConfig, SaltaXConfig
+from src.intelligence.database import IntelligenceDB
 
 # ---------------------------------------------------------------------------
 # Valid YAML content matching the production saltax.config.yaml structure
@@ -92,6 +94,13 @@ VALID_YAML = textwrap.dedent("""\
         enabled: true
         similarity_threshold: 0.85
         embedding_model: "text-embedding"
+      issue_dedup:
+        enabled: true
+        similarity_threshold: 0.90
+        embedding_model: "text-embedding"
+        max_candidates: 500
+        apply_label: false
+        label_name: "duplicate-candidate"
       ranking:
         enabled: true
         label_superseded: "superseded"
@@ -105,6 +114,36 @@ VALID_YAML = textwrap.dedent("""\
         review_type: "COMMENT"
         label_recommends_merge: "saltax-recommends-merge"
         label_recommends_reject: "saltax-recommends-reject"
+
+    backfill:
+      per_page: 100
+      page_delay_seconds: 1.0
+      concurrency: 3
+      max_failures_before_abort: 50
+      rate_limit_max_wait_seconds: 3600
+      default_mode: "full"
+
+    patrol:
+      enabled: false
+      interval_seconds: 21600
+      max_concurrent_repos: 3
+      dependency_audit:
+        enabled: true
+        severity_threshold: "HIGH"
+        auto_patch: true
+        bounty_for_breaking: true
+      codebase_scan:
+        enabled: true
+        semgrep_config: "auto"
+        rescan_interval_hours: 168
+      bounty_assignment:
+        enabled: true
+        severity_to_label:
+          CRITICAL: "bounty-xl"
+          HIGH: "bounty-lg"
+          MEDIUM: "bounty-md"
+          LOW: "bounty-sm"
+        max_open_bounties_per_repo: 10
 """)
 
 # ---------------------------------------------------------------------------
@@ -150,3 +189,55 @@ def sample_config(valid_config_yaml: Path) -> SaltaXConfig:
 def sample_env(valid_env_vars: dict[str, str]) -> EnvConfig:
     """Return a loaded ``EnvConfig`` from the monkeypatched environment."""
     return EnvConfig(_env_file=None)  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# Shared fixtures — available to all test files (Doc 27)
+# ---------------------------------------------------------------------------
+
+_FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture()
+async def mock_intel_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> IntelligenceDB:
+    """Real IntelligenceDB on ``tmp_path`` with mocked KMS and full production schema.
+
+    Named ``mock_intel_db`` (not ``intel_db``) to avoid shadowing per-file
+    fixtures in existing tests.
+    """
+    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
+    kms = AsyncMock()
+    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
+    db = IntelligenceDB(kms=kms)
+    try:
+        await db.initialize()
+        yield db  # type: ignore[misc]
+    finally:
+        await db.close()
+
+
+@pytest.fixture()
+def mock_github_client() -> AsyncMock:
+    """Pre-configured ``AsyncMock`` mimicking ``GitHubClient`` methods."""
+    client = AsyncMock()
+    client.get_pr_diff = AsyncMock(
+        return_value="diff --git a/f.py b/f.py\n+pass",
+    )
+    client.list_issue_comments = AsyncMock(return_value=[])
+    client.post_pr_comment = AsyncMock(return_value=None)
+    client.create_comment = AsyncMock(return_value=None)
+    client.merge_pr = AsyncMock(return_value={"merged": True})
+    client.add_labels = AsyncMock(return_value=None)
+    return client
+
+
+@pytest.fixture()
+def sample_pr_diff() -> str:
+    """Clean single-file bugfix diff — no security issues."""
+    return (_FIXTURES_DIR / "sample_prs" / "clean_bugfix.diff").read_text()
+
+
+@pytest.fixture()
+def sample_malicious_diff() -> str:
+    """Diff containing SQL injection and a hardcoded secret."""
+    return (_FIXTURES_DIR / "sample_prs" / "sql_injection.diff").read_text()

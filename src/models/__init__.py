@@ -21,6 +21,7 @@ from src.models.enums import (
 )
 from src.models.github import BountyInfo, IssueEvent, PREvent
 from src.models.identity import AgentIdentity, ReputationMetrics
+from src.models.patrol import DependencyFinding, PatrolFinding
 from src.models.pipeline import AIAnalysisResult, Finding, TestResult, Verdict
 from src.models.staking import ChallengeEvent, StakeDeposit
 from src.models.treasury import PayoutRequest, TransactionRecord, TreasurySnapshot
@@ -60,4 +61,7 @@ __all__ = [
     # Attestation
     "AttestationProof",
     "SignedVerdict",
+    # Patrol
+    "DependencyFinding",
+    "PatrolFinding",
 ]

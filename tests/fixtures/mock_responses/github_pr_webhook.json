@@ -1,0 +1,35 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "number": 42,
+    "title": "Fix null pointer in config parser",
+    "body": "Fixes #41. The config parser crashed on empty input.",
+    "user": {
+      "login": "contributor-alice",
+      "id": 12345
+    },
+    "head": {
+      "sha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+      "ref": "fix/config-null-pointer"
+    },
+    "base": {
+      "ref": "main"
+    },
+    "diff_url": "https://github.com/saltax-org/saltax/pull/42.diff",
+    "labels": [
+      {"name": "bug"},
+      {"name": "bounty-md"}
+    ],
+    "created_at": "2026-02-15T10:30:00Z",
+    "draft": false
+  },
+  "repository": {
+    "full_name": "saltax-org/saltax",
+    "html_url": "https://github.com/saltax-org/saltax",
+    "clone_url": "https://github.com/saltax-org/saltax.git"
+  },
+  "installation": {
+    "id": 98765
+  }
+}

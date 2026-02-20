@@ -1,0 +1,12 @@
+diff --git a/src/pipeline/runner.py b/src/pipeline/runner.py
+index ccc3333..ddd4444 100644
+--- a/src/pipeline/runner.py
++++ b/src/pipeline/runner.py
+@@ -42,6 +42,7 @@ class Pipeline:
+     async def run(self, state_dict: dict) -> PipelineState:
+         """Execute the full pipeline."""
+         state = PipelineState(**state_dict)
++        state.trace_id = str(uuid.uuid4())
+         for stage in self._stages:
+             if state.short_circuit:
+                 break

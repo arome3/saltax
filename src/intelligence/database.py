@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 12
+_CURRENT_SCHEMA_VERSION = 15
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -121,7 +121,8 @@ CREATE TABLE IF NOT EXISTS active_bounties (
     amount_eth   REAL NOT NULL DEFAULT 0.0,
     status       TEXT NOT NULL DEFAULT 'open',
     created_at   TEXT NOT NULL,
-    claimed_by   TEXT
+    claimed_by   TEXT,
+    source       TEXT DEFAULT 'pipeline'
 );
 
 CREATE TABLE IF NOT EXISTS verification_windows (
@@ -250,6 +251,102 @@ CREATE TABLE IF NOT EXISTS ranking_updates (
 
 CREATE INDEX IF NOT EXISTS idx_ru_repo_issue ON ranking_updates(repo, issue_number);
 CREATE INDEX IF NOT EXISTS idx_pe_repo_issue ON pr_embeddings(repo, issue_number);
+
+CREATE TABLE IF NOT EXISTS issue_embeddings (
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    issue_number INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    labels TEXT,
+    status TEXT DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repo, issue_number)
+);
+CREATE INDEX IF NOT EXISTS idx_ie_repo ON issue_embeddings(repo);
+CREATE INDEX IF NOT EXISTS idx_ie_status ON issue_embeddings(status);
+
+CREATE TABLE IF NOT EXISTS backfill_progress (
+    id         TEXT PRIMARY KEY,
+    repo       TEXT NOT NULL,
+    mode       TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'running',
+    last_page  INTEGER NOT NULL DEFAULT 0,
+    processed  INTEGER NOT NULL DEFAULT 0,
+    failed     INTEGER NOT NULL DEFAULT 0,
+    skipped    INTEGER NOT NULL DEFAULT 0,
+    error_msg  TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(repo, mode)
+);
+CREATE INDEX IF NOT EXISTS idx_bp_repo_mode ON backfill_progress(repo, mode);
+
+CREATE TABLE IF NOT EXISTS patrol_history (
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    dependency_findings_count INTEGER DEFAULT 0,
+    code_findings_count INTEGER DEFAULT 0,
+    patches_generated INTEGER DEFAULT 0,
+    issues_created INTEGER DEFAULT 0,
+    bounties_assigned_wei TEXT DEFAULT '0',
+    attestation_id TEXT,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_patrol_history_repo ON patrol_history(repo);
+CREATE INDEX IF NOT EXISTS idx_patrol_history_timestamp ON patrol_history(timestamp);
+
+CREATE TABLE IF NOT EXISTS known_vulnerabilities (
+    id TEXT PRIMARY KEY,
+    cve_id TEXT,
+    dedup_key TEXT NOT NULL,
+    package_name TEXT NOT NULL,
+    language TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    affected_range TEXT NOT NULL,
+    fixed_version TEXT,
+    advisory_url TEXT,
+    repo TEXT NOT NULL,
+    first_detected TEXT NOT NULL DEFAULT (datetime('now')),
+    last_checked TEXT NOT NULL DEFAULT (datetime('now')),
+    status TEXT NOT NULL DEFAULT 'open',
+    bounty_issue_number INTEGER,
+    UNIQUE(repo, dedup_key)
+);
+CREATE INDEX IF NOT EXISTS idx_known_vuln_package ON known_vulnerabilities(package_name, language);
+CREATE INDEX IF NOT EXISTS idx_known_vuln_cve ON known_vulnerabilities(cve_id);
+
+CREATE TABLE IF NOT EXISTS patrol_finding_signatures (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo TEXT NOT NULL,
+    rule_id TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    line_start INTEGER NOT NULL,
+    bounty_issue_number INTEGER,
+    first_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(repo, rule_id, file_path, line_start)
+);
+CREATE INDEX IF NOT EXISTS idx_pfs_repo ON patrol_finding_signatures(repo);
+
+CREATE TABLE IF NOT EXISTS patrol_patches (
+    id TEXT PRIMARY KEY,
+    repo TEXT NOT NULL,
+    pr_number INTEGER,
+    cve_id TEXT,
+    package_name TEXT NOT NULL,
+    old_version TEXT NOT NULL,
+    new_version TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    merged_at TEXT,
+    attestation_id TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_patrol_patches_repo ON patrol_patches(repo);
+CREATE INDEX IF NOT EXISTS idx_patrol_patches_status ON patrol_patches(status);
 """
 
 
@@ -303,6 +400,11 @@ class IntelligenceDB:
         if self._db is None:
             raise RuntimeError("IntelligenceDB is not initialized; call initialize() first")
         return self._db
+
+    async def ping(self) -> None:
+        """Lightweight health probe — raises RuntimeError if not initialized."""
+        db = self._require_db()
+        await db.execute("SELECT 1")
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -561,6 +663,123 @@ class IntelligenceDB:
                         "CREATE INDEX IF NOT EXISTS idx_vsh_repo_created "
                         "ON vision_score_history(repo, created_at DESC);"
                     )
+                    await db.commit()
+                if current < 13:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS issue_embeddings ("
+                        "    id TEXT PRIMARY KEY,"
+                        "    repo TEXT NOT NULL,"
+                        "    issue_number INTEGER NOT NULL,"
+                        "    title TEXT NOT NULL,"
+                        "    embedding BLOB NOT NULL,"
+                        "    labels TEXT,"
+                        "    status TEXT DEFAULT 'open',"
+                        "    created_at TEXT NOT NULL,"
+                        "    updated_at TEXT NOT NULL,"
+                        "    UNIQUE(repo, issue_number)"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_ie_repo "
+                        "ON issue_embeddings(repo);"
+                        "CREATE INDEX IF NOT EXISTS idx_ie_status "
+                        "ON issue_embeddings(status);"
+                    )
+                    await db.commit()
+                if current < 14:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS backfill_progress ("
+                        "    id         TEXT PRIMARY KEY,"
+                        "    repo       TEXT NOT NULL,"
+                        "    mode       TEXT NOT NULL,"
+                        "    status     TEXT NOT NULL DEFAULT 'running',"
+                        "    last_page  INTEGER NOT NULL DEFAULT 0,"
+                        "    processed  INTEGER NOT NULL DEFAULT 0,"
+                        "    failed     INTEGER NOT NULL DEFAULT 0,"
+                        "    skipped    INTEGER NOT NULL DEFAULT 0,"
+                        "    error_msg  TEXT,"
+                        "    created_at TEXT NOT NULL,"
+                        "    updated_at TEXT NOT NULL,"
+                        "    UNIQUE(repo, mode)"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_bp_repo_mode "
+                        "ON backfill_progress(repo, mode);"
+                    )
+                    await db.commit()
+                if current < 15:
+                    await db.executescript(
+                        "CREATE TABLE IF NOT EXISTS patrol_history ("
+                        "    id TEXT PRIMARY KEY,"
+                        "    repo TEXT NOT NULL,"
+                        "    timestamp TEXT NOT NULL,"
+                        "    dependency_findings_count INTEGER DEFAULT 0,"
+                        "    code_findings_count INTEGER DEFAULT 0,"
+                        "    patches_generated INTEGER DEFAULT 0,"
+                        "    issues_created INTEGER DEFAULT 0,"
+                        "    bounties_assigned_wei TEXT DEFAULT '0',"
+                        "    attestation_id TEXT,"
+                        "    duration_ms INTEGER,"
+                        "    created_at TEXT NOT NULL DEFAULT (datetime('now'))"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_patrol_history_repo "
+                        "ON patrol_history(repo);"
+                        "CREATE INDEX IF NOT EXISTS idx_patrol_history_timestamp "
+                        "ON patrol_history(timestamp);"
+                        "CREATE TABLE IF NOT EXISTS known_vulnerabilities ("
+                        "    id TEXT PRIMARY KEY,"
+                        "    cve_id TEXT,"
+                        "    dedup_key TEXT NOT NULL,"
+                        "    package_name TEXT NOT NULL,"
+                        "    language TEXT NOT NULL,"
+                        "    severity TEXT NOT NULL,"
+                        "    affected_range TEXT NOT NULL,"
+                        "    fixed_version TEXT,"
+                        "    advisory_url TEXT,"
+                        "    repo TEXT NOT NULL,"
+                        "    first_detected TEXT NOT NULL DEFAULT (datetime('now')),"
+                        "    last_checked TEXT NOT NULL DEFAULT (datetime('now')),"
+                        "    status TEXT NOT NULL DEFAULT 'open',"
+                        "    bounty_issue_number INTEGER,"
+                        "    UNIQUE(repo, dedup_key)"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_known_vuln_package "
+                        "ON known_vulnerabilities(package_name, language);"
+                        "CREATE INDEX IF NOT EXISTS idx_known_vuln_cve "
+                        "ON known_vulnerabilities(cve_id);"
+                        "CREATE TABLE IF NOT EXISTS patrol_finding_signatures ("
+                        "    id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                        "    repo TEXT NOT NULL,"
+                        "    rule_id TEXT NOT NULL,"
+                        "    file_path TEXT NOT NULL,"
+                        "    line_start INTEGER NOT NULL,"
+                        "    bounty_issue_number INTEGER,"
+                        "    first_seen TEXT NOT NULL DEFAULT (datetime('now')),"
+                        "    last_seen TEXT NOT NULL DEFAULT (datetime('now')),"
+                        "    UNIQUE(repo, rule_id, file_path, line_start)"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_pfs_repo "
+                        "ON patrol_finding_signatures(repo);"
+                        "CREATE TABLE IF NOT EXISTS patrol_patches ("
+                        "    id TEXT PRIMARY KEY,"
+                        "    repo TEXT NOT NULL,"
+                        "    pr_number INTEGER,"
+                        "    cve_id TEXT,"
+                        "    package_name TEXT NOT NULL,"
+                        "    old_version TEXT NOT NULL,"
+                        "    new_version TEXT NOT NULL,"
+                        "    status TEXT DEFAULT 'pending',"
+                        "    created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                        "    merged_at TEXT,"
+                        "    attestation_id TEXT"
+                        ");"
+                        "CREATE INDEX IF NOT EXISTS idx_patrol_patches_repo "
+                        "ON patrol_patches(repo);"
+                        "CREATE INDEX IF NOT EXISTS idx_patrol_patches_status "
+                        "ON patrol_patches(status);"
+                    )
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        await db.execute(
+                            "ALTER TABLE active_bounties "
+                            "ADD COLUMN source TEXT DEFAULT 'pipeline'",
+                        )
                     await db.commit()
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
@@ -1123,6 +1342,7 @@ class IntelligenceDB:
         issue_number: int,
         label: str,
         amount_eth: float = 0.0,
+        source: str = "pipeline",
     ) -> None:
         """Create or update a bounty record."""
         db = self._require_db()
@@ -1131,10 +1351,10 @@ class IntelligenceDB:
             await db.execute(
                 """\
                 INSERT OR REPLACE INTO active_bounties
-                    (id, repo, issue_number, label, amount_eth, status, created_at)
-                VALUES (?, ?, ?, ?, ?, 'open', ?)
+                    (id, repo, issue_number, label, amount_eth, status, created_at, source)
+                VALUES (?, ?, ?, ?, ?, 'open', ?, ?)
                 """,
-                (bounty_id, repo, issue_number, label, amount_eth, now),
+                (bounty_id, repo, issue_number, label, amount_eth, now, source),
             )
             await db.commit()
 
@@ -1997,3 +2217,512 @@ class IntelligenceDB:
             }
             for row in rows
         ]
+
+    # ── Issue embeddings ────────────────────────────────────────────────
+
+    async def store_issue_embedding(
+        self,
+        *,
+        issue_id: str,
+        repo: str,
+        issue_number: int,
+        title: str,
+        embedding: bytes,
+        labels: list[str] | None = None,
+    ) -> None:
+        """Store or upsert an issue embedding.
+
+        Uses ``ON CONFLICT(repo, issue_number) DO UPDATE`` to transparently
+        update when an issue is edited while preserving the original
+        ``created_at`` timestamp for correct recency ordering.
+        ``labels`` is serialized as a JSON array string.
+        Uses ``_write_lock`` to prevent concurrent writers.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        labels_json = json.dumps(labels) if labels is not None else None
+
+        async def _do_store() -> None:
+            async with self._write_lock:
+                await db.execute(
+                    """\
+                    INSERT INTO issue_embeddings
+                        (id, repo, issue_number, title, embedding,
+                         labels, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)
+                    ON CONFLICT(repo, issue_number) DO UPDATE SET
+                        id = excluded.id,
+                        title = excluded.title,
+                        embedding = excluded.embedding,
+                        labels = excluded.labels,
+                        status = 'open',
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        issue_id, repo, issue_number, title,
+                        embedding, labels_json, now, now,
+                    ),
+                )
+                await db.commit()
+
+        await _retry_on_busy(_do_store)
+
+    async def get_recent_issue_embeddings(
+        self,
+        repo: str,
+        *,
+        exclude_issue: int,
+        status: str = "open",
+        limit: int = 500,
+    ) -> list[dict[str, object]]:
+        """Fetch recent issue embeddings for a repo, excluding one issue.
+
+        Returns rows as dicts with ``issue_number``, ``title``,
+        ``embedding`` (bytes blob), and ``status``.  Read-only — no
+        ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT issue_number, title, embedding, status "
+            "FROM issue_embeddings "
+            "WHERE repo = ? AND issue_number != ? AND status = ? "
+            "ORDER BY created_at DESC LIMIT ?",
+            (repo, exclude_issue, status, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "issue_number": row[0],
+                "title": row[1],
+                "embedding": row[2],
+                "status": row[3],
+            }
+            for row in rows
+        ]
+
+    async def get_issue_embedding(
+        self,
+        repo: str,
+        issue_number: int,
+    ) -> dict[str, object] | None:
+        """Retrieve a single issue embedding by repo+issue_number.
+
+        Returns the full row as a dict, or ``None`` if not found.
+        Read-only — no ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM issue_embeddings "
+            "WHERE repo = ? AND issue_number = ?",
+            (repo, issue_number),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def update_issue_status(
+        self,
+        repo: str,
+        issue_number: int,
+        status: str,
+    ) -> int:
+        """Update the status of an issue embedding.
+
+        Returns the number of rows updated (0 or 1).
+        Uses ``_write_lock`` for write safety.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            cursor = await db.execute(
+                "UPDATE issue_embeddings SET status = ?, updated_at = ? "
+                "WHERE repo = ? AND issue_number = ?",
+                (status, now, repo, issue_number),
+            )
+            updated = cursor.rowcount
+            await db.commit()
+            return updated
+
+    # ── PR embedding lookup ──────────────────────────────────────────────
+
+    async def get_pr_embedding(
+        self,
+        repo: str,
+        pr_number: int,
+    ) -> dict[str, object] | None:
+        """Retrieve a single PR embedding by repo+pr_number.
+
+        Used by the backfill engine for idempotency checks — if an
+        embedding already exists, the PR can be skipped.
+        Read-only — no ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT id, pr_id, repo, pr_number, commit_sha, embedding_model, "
+            "issue_number, created_at "
+            "FROM pr_embeddings WHERE repo = ? AND pr_number = ?",
+            (repo, pr_number),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    # ── Vector index support ──────────────────────────────────────────────
+
+    _EMBEDDING_TABLES = frozenset({"pr_embeddings", "issue_embeddings"})
+
+    async def get_all_embeddings(self, *, table: str) -> list[dict[str, object]]:
+        """Bulk-read all embeddings for HNSW index initialization.
+
+        For ``pr_embeddings``, returns ``pr_id`` as the external ID (not the
+        hash ``id``), ordered by ``created_at ASC`` so that later entries for
+        the same ``pr_id`` overwrite earlier ones in the index.
+
+        For ``issue_embeddings``, returns ``id`` as the external ID.
+
+        Raises ``ValueError`` for unrecognised table names (SQL injection guard).
+        """
+        if table not in self._EMBEDDING_TABLES:
+            raise ValueError(f"Invalid embedding table: {table}")
+        db = self._require_db()
+        if table == "pr_embeddings":
+            query = "SELECT pr_id, embedding FROM pr_embeddings ORDER BY created_at ASC"
+        else:
+            query = "SELECT id, embedding FROM issue_embeddings"
+        async with db.execute(query) as cursor:
+            rows = await cursor.fetchall()
+        return [{"id": row[0], "embedding": row[1]} for row in rows]
+
+    async def count_embeddings(self, table: str) -> int:
+        """Count embeddings in a table for auto-enable heuristic.
+
+        Raises ``ValueError`` for unrecognised table names.
+        """
+        if table not in self._EMBEDDING_TABLES:
+            raise ValueError(f"Invalid embedding table: {table}")
+        db = self._require_db()
+        if table == "pr_embeddings":
+            query = "SELECT COUNT(*) FROM pr_embeddings"
+        else:
+            query = "SELECT COUNT(*) FROM issue_embeddings"
+        async with db.execute(query) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def get_pr_embedding_by_pr_id(self, pr_id: str) -> dict[str, object] | None:
+        """Fetch most recent PR embedding metadata by ``pr_id``.
+
+        Returns ``pr_id``, ``pr_number``, and ``commit_sha`` for the most
+        recent embedding row matching the given ``pr_id``.  Used by
+        ``find_similar`` to enrich HNSW results with PR metadata.
+
+        Read-only — no ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT pr_id, pr_number, commit_sha FROM pr_embeddings "
+            "WHERE pr_id = ? ORDER BY created_at DESC LIMIT 1",
+            (pr_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return {"pr_id": row[0], "pr_number": row[1], "commit_sha": row[2]}
+
+    # ── Backfill progress ────────────────────────────────────────────────
+
+    async def get_backfill_progress(
+        self,
+        repo: str,
+        mode: str,
+    ) -> dict[str, object] | None:
+        """Retrieve the backfill progress record for a repo+mode.
+
+        Returns the row as a dict, or ``None`` if no prior run exists.
+        Read-only — no ``_write_lock`` required.
+        """
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM backfill_progress WHERE repo = ? AND mode = ?",
+            (repo, mode),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def save_backfill_progress(
+        self,
+        *,
+        repo: str,
+        mode: str,
+        status: str,
+        last_page: int,
+        processed: int,
+        failed: int,
+        skipped: int,
+        error_msg: str | None = None,
+    ) -> None:
+        """Upsert backfill progress for a repo+mode.
+
+        Uses ``ON CONFLICT(repo, mode) DO UPDATE`` so repeated saves
+        are idempotent.  Uses ``_write_lock`` for write safety.
+        """
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        progress_id = hashlib.sha256(f"backfill:{repo}:{mode}".encode()).hexdigest()[:16]
+
+        async def _do_save() -> None:
+            async with self._write_lock:
+                await db.execute(
+                    """\
+                    INSERT INTO backfill_progress
+                        (id, repo, mode, status, last_page, processed,
+                         failed, skipped, error_msg, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(repo, mode) DO UPDATE SET
+                        status = excluded.status,
+                        last_page = excluded.last_page,
+                        processed = excluded.processed,
+                        failed = excluded.failed,
+                        skipped = excluded.skipped,
+                        error_msg = excluded.error_msg,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        progress_id, repo, mode, status, last_page,
+                        processed, failed, skipped, error_msg, now, now,
+                    ),
+                )
+                await db.commit()
+
+        await _retry_on_busy(_do_save)
+
+    # ── Patrol ────────────────────────────────────────────────────────────
+
+    async def record_patrol_run(
+        self,
+        *,
+        run_id: str,
+        repo: str,
+        timestamp: str,
+        dependency_findings_count: int = 0,
+        code_findings_count: int = 0,
+        patches_generated: int = 0,
+        issues_created: int = 0,
+        bounties_assigned_wei: str = "0",
+        attestation_id: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Insert a patrol run record into ``patrol_history``."""
+        db = self._require_db()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT INTO patrol_history
+                    (id, repo, timestamp, dependency_findings_count,
+                     code_findings_count, patches_generated, issues_created,
+                     bounties_assigned_wei, attestation_id, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id, repo, timestamp, dependency_findings_count,
+                    code_findings_count, patches_generated, issues_created,
+                    bounties_assigned_wei, attestation_id, duration_ms,
+                ),
+            )
+            await db.commit()
+
+    async def get_latest_patrol_run(self, repo: str) -> dict[str, object] | None:
+        """Return the most recent patrol run for *repo*, or ``None``."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM patrol_history WHERE repo = ? "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (repo,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    async def record_patrol_patch(
+        self,
+        *,
+        patch_id: str,
+        repo: str,
+        pr_number: int | None = None,
+        cve_id: str | None = None,
+        package_name: str,
+        old_version: str,
+        new_version: str,
+        status: str = "pending",
+        attestation_id: str | None = None,
+    ) -> None:
+        """Insert a patrol patch record into ``patrol_patches``."""
+        db = self._require_db()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT INTO patrol_patches
+                    (id, repo, pr_number, cve_id, package_name,
+                     old_version, new_version, status, attestation_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    patch_id, repo, pr_number, cve_id, package_name,
+                    old_version, new_version, status, attestation_id,
+                ),
+            )
+            await db.commit()
+
+    async def count_open_patrol_bounties(self, repo: str) -> int:
+        """Count open bounties created by patrol for *repo*."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT COUNT(*) FROM active_bounties "
+            "WHERE repo = ? AND status = 'open' AND source = 'patrol'",
+            (repo,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def get_known_vulnerability(
+        self, repo: str, dedup_key: str,
+    ) -> dict[str, object] | None:
+        """Look up a known vulnerability by repo + dedup_key."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM known_vulnerabilities WHERE repo = ? AND dedup_key = ?",
+            (repo, dedup_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    @staticmethod
+    def compute_dedup_key(
+        cve_id: str | None,
+        package_name: str,
+        language: str,
+        affected_range: str,
+    ) -> str:
+        """Compute a deterministic dedup key for a vulnerability.
+
+        Uses the CVE ID when available, otherwise falls back to a composite
+        of package metadata so non-CVE findings still dedup correctly.
+        """
+        if cve_id:
+            return cve_id
+        return f"{package_name}:{language}:{affected_range}"
+
+    async def upsert_known_vulnerability(
+        self,
+        *,
+        vuln_id: str,
+        cve_id: str | None,
+        dedup_key: str,
+        package_name: str,
+        language: str,
+        severity: str,
+        affected_range: str,
+        fixed_version: str | None = None,
+        advisory_url: str | None = None,
+        repo: str,
+        status: str = "open",
+        bounty_issue_number: int | None = None,
+    ) -> None:
+        """Insert or update a known vulnerability record."""
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                """\
+                INSERT INTO known_vulnerabilities
+                    (id, cve_id, dedup_key, package_name, language, severity,
+                     affected_range, fixed_version, advisory_url, repo,
+                     first_detected, last_checked, status, bounty_issue_number)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo, dedup_key) DO UPDATE SET
+                    severity = excluded.severity,
+                    affected_range = excluded.affected_range,
+                    fixed_version = excluded.fixed_version,
+                    advisory_url = excluded.advisory_url,
+                    last_checked = excluded.last_checked,
+                    status = excluded.status,
+                    bounty_issue_number = COALESCE(
+                        excluded.bounty_issue_number,
+                        known_vulnerabilities.bounty_issue_number
+                    )
+                """,
+                (
+                    vuln_id, cve_id, dedup_key, package_name, language, severity,
+                    affected_range, fixed_version, advisory_url, repo,
+                    now, now, status, bounty_issue_number,
+                ),
+            )
+            await db.commit()
+
+    # ── Patrol finding signatures ─────────────────────────────────────
+
+    async def get_known_finding_signatures(
+        self, repo: str,
+    ) -> set[tuple[str, str, int]]:
+        """Return known finding signatures as ``(rule_id, file_path, line_start)`` tuples."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT rule_id, file_path, line_start FROM patrol_finding_signatures "
+            "WHERE repo = ?",
+            (repo,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return {(row[0], row[1], row[2]) for row in rows}
+
+    async def upsert_finding_signatures(
+        self,
+        repo: str,
+        signatures: list[tuple[str, str, int]],
+    ) -> None:
+        """Batch insert or update finding signatures, refreshing ``last_seen``."""
+        if not signatures:
+            return
+        db = self._require_db()
+        now = datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            for rule_id, file_path, line_start in signatures:
+                await db.execute(
+                    """\
+                    INSERT INTO patrol_finding_signatures
+                        (repo, rule_id, file_path, line_start, first_seen, last_seen)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(repo, rule_id, file_path, line_start) DO UPDATE SET
+                        last_seen = excluded.last_seen
+                    """,
+                    (repo, rule_id, file_path, line_start, now, now),
+                )
+            await db.commit()
+
+    async def get_code_finding_bounty(
+        self, repo: str, rule_id: str, file_path: str, line_start: int,
+    ) -> int | None:
+        """Return bounty issue number for a code finding, or ``None`` if not found."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT bounty_issue_number FROM patrol_finding_signatures "
+            "WHERE repo = ? AND rule_id = ? AND file_path = ? AND line_start = ? "
+            "AND bounty_issue_number IS NOT NULL",
+            (repo, rule_id, file_path, line_start),
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def set_finding_bounty(
+        self, repo: str, rule_id: str, file_path: str, line_start: int,
+        bounty_issue_number: int,
+    ) -> None:
+        """Record the bounty issue number for a code finding signature."""
+        db = self._require_db()
+        async with self._write_lock:
+            await db.execute(
+                "UPDATE patrol_finding_signatures SET bounty_issue_number = ? "
+                "WHERE repo = ? AND rule_id = ? AND file_path = ? AND line_start = ?",
+                (bounty_issue_number, repo, rule_id, file_path, line_start),
+            )
+            await db.commit()

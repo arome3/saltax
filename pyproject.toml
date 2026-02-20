@@ -23,11 +23,15 @@ dependencies = [
     "python-json-logger>=2.0,<3.0",
     "numpy>=1.26.0,<3.0",
     "aiosqlite>=0.20.0,<1.0",
+    "click>=8.1.0,<9.0",
 ]
 
 [project.optional-dependencies]
 prod = [
     "semgrep>=1.60.0,<2.0",
+]
+vector = [
+    "usearch>=2.16",
 ]
 test = [
     "pytest>=8.0,<9.0",
@@ -42,6 +46,7 @@ dev = [
 
 [project.scripts]
 saltax = "src.main:main"
+saltax-backfill = "src.cli.backfill:main"
 
 [tool.setuptools.packages.find]
 include = ["src*"]
@@ -71,3 +76,21 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-v --tb=short"
+markers = [
+    "e2e: end-to-end tests (deselect with '-m not e2e')",
+    "slow: tests that take more than 5s",
+]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["src/__main__.py"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+]

@@ -1,0 +1,18 @@
+diff --git a/src/db/queries.py b/src/db/queries.py
+index aaa1111..bbb2222 100644
+--- a/src/db/queries.py
++++ b/src/db/queries.py
+@@ -10,6 +10,12 @@ import sqlite3
+
+ DB_PATH = "data/app.db"
+
++API_KEY = "sk-live-12345-secret-key-do-not-share"
++
++def get_user(user_id: str) -> dict:
++    conn = sqlite3.connect(DB_PATH)
++    cursor = conn.cursor()
++    cursor.execute(f"SELECT * FROM users WHERE id = '{user_id}'")
++    return dict(cursor.fetchone())
+
+ def get_all_users() -> list[dict]:
+     conn = sqlite3.connect(DB_PATH)

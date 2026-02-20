@@ -26,7 +26,6 @@ from contextlib import suppress
 from typing import Any
 
 import uvicorn
-from pythonjsonlogger.jsonlogger import JsonFormatter
 
 from src.api.app import create_app
 from src.api.middleware.tx_store import TxHashStore
@@ -42,6 +41,10 @@ from src.identity.registration import IdentityRegistrar
 from src.identity.reputation import ReputationManager
 from src.intelligence.database import IntelligenceDB
 from src.intelligence.sealing import KMSSealManager
+from src.intelligence.vector_index import VectorIndexManager, maybe_enable_vector_index
+from src.observability import configure_logging
+from src.observability.metrics import BudgetTracker
+from src.patrol.scheduler import PatrolScheduler
 from src.pipeline.runner import build_pipeline
 from src.staking import StakeResolver, StakingContract, StakingEconomics
 from src.treasury.manager import TreasuryManager
@@ -52,29 +55,6 @@ from src.verification.scheduler import VerificationScheduler
 logger = logging.getLogger("saltax.bootstrap")
 
 _SHUTDOWN_TIMEOUT = 30.0
-
-
-# ── Pre-phase: structured logging ────────────────────────────────────────────
-
-
-def _configure_logging() -> None:
-    """Install JSON-formatted logging on the root logger.
-
-    Reads ``SALTAX_LOG_LEVEL`` from the environment (before :class:`EnvConfig`
-    is available) and defaults to ``INFO``.
-    """
-    level_name = os.environ.get("SALTAX_LOG_LEVEL", "INFO").upper()
-    level = getattr(logging, level_name, logging.INFO)
-
-    formatter = JsonFormatter("%(asctime)s %(name)s %(levelname)s %(message)s")
-
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(formatter)
-
-    root = logging.getLogger()
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.setLevel(level)
 
 
 # ── TS proxy subprocess manager ──────────────────────────────────────────────
@@ -206,6 +186,8 @@ async def _graceful_shutdown(
     wallet: WalletManager,
     identity: IdentityRegistrar,
     ts_proxy: TSProxyManager,
+    patrol_scheduler: PatrolScheduler | None = None,
+    patrol_scheduler_task: asyncio.Task[None] | None = None,
     timeout: float = _SHUTDOWN_TIMEOUT,
 ) -> None:
     """Execute the ordered shutdown sequence with a timeout.
@@ -218,6 +200,14 @@ async def _graceful_shutdown(
     try:
         async with asyncio.timeout(timeout):
             server.should_exit = True
+
+            # Stop patrol BEFORE dispute_scheduler (patrol creates work that
+            # dispute processes).
+            if patrol_scheduler is not None:
+                try:
+                    await patrol_scheduler.close()
+                except Exception:
+                    logger.exception("Error stopping patrol scheduler")
 
             try:
                 await dispute_scheduler.stop()
@@ -258,7 +248,13 @@ async def _graceful_shutdown(
     except TimeoutError:
         logger.error("Graceful shutdown timed out after %.0fs", timeout)
     finally:
-        all_tasks = (server_task, scheduler_task, dispute_scheduler_task)
+        all_tasks = tuple(
+            t for t in (
+                server_task, scheduler_task,
+                dispute_scheduler_task, patrol_scheduler_task,
+            )
+            if t is not None
+        )
         for task in all_tasks:
             if not task.done():
                 task.cancel()
@@ -272,7 +268,7 @@ async def _graceful_shutdown(
 
 async def bootstrap() -> None:  # noqa: C901
     """Execute the 5-phase bootstrap sequence."""
-    _configure_logging()
+    configure_logging()
     logger.info("SaltaX bootstrap starting")
 
     resources: list[tuple[str, Any]] = []
@@ -327,6 +323,12 @@ async def bootstrap() -> None:  # noqa: C901
         resources.append(("intel_db", intel_db))
         pattern_count = await intel_db.count_patterns()
 
+        # Vector index (ephemeral HNSW acceleration layer)
+        vector_index_manager = VectorIndexManager(config)
+        await vector_index_manager.initialize(intel_db)
+        await maybe_enable_vector_index(intel_db, config, vector_index_manager)
+        resources.append(("vector_index_manager", vector_index_manager))
+
         # Wire intel_db to identity for cache recovery, then register
         identity.intel_db = intel_db
         await identity.register_or_recover()
@@ -346,9 +348,13 @@ async def bootstrap() -> None:  # noqa: C901
         from src.attestation.engine import AttestationEngine  # noqa: PLC0415
         from src.attestation.store import AttestationStore  # noqa: PLC0415
 
+        budget_tracker = BudgetTracker()
         attestation_store = AttestationStore(intel_db)
         attestation_engine = AttestationEngine(wallet=wallet, store=attestation_store)
-        pipeline = build_pipeline(config, env, intel_db, attestation_engine)
+        pipeline = build_pipeline(
+            config, env, intel_db, attestation_engine,
+            budget_tracker=budget_tracker,
+        )
         github_client = GitHubClient(
             app_id=env.github_app_id,
             private_key=env.github_app_private_key,
@@ -361,10 +367,12 @@ async def bootstrap() -> None:  # noqa: C901
             intel_db=intel_db,
             treasury_config=config.treasury,
             bounty_config=config.bounties,
+            budget_tracker=budget_tracker,
         )
         resources.append(("treasury_mgr", treasury_mgr))
         scheduler = VerificationScheduler(
             config, intel_db, github_client, treasury_mgr, kms=kms,
+            budget_tracker=budget_tracker,
         )
         resources.append(("scheduler", scheduler))
         await scheduler.recover_pending_windows()
@@ -404,6 +412,16 @@ async def bootstrap() -> None:  # noqa: C901
             config.disputes, intel_db, dispute_router, scheduler,
         )
         resources.append(("dispute_scheduler", dispute_scheduler))
+
+        # Patrol scheduler (autonomous repo scanning)
+        patrol_scheduler: PatrolScheduler | None = None
+        if config.patrol.enabled:
+            patrol_scheduler = PatrolScheduler(
+                config, env, github_client, intel_db,
+                treasury_mgr, attestation_engine,
+            )
+            resources.append(("patrol_scheduler", patrol_scheduler))
+
         logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
@@ -413,6 +431,7 @@ async def bootstrap() -> None:  # noqa: C901
     # ── Phase 5: Start Services ──────────────────────────────────────────
     scheduler_task: asyncio.Task[None] | None = None
     dispute_scheduler_task: asyncio.Task[None] | None = None
+    patrol_scheduler_task: asyncio.Task[None] | None = None
     server_task: asyncio.Task[None] | None = None
     try:
         logger.info("Phase 5: Start Services")
@@ -430,10 +449,16 @@ async def bootstrap() -> None:  # noqa: C901
             tx_store=tx_store,
             reputation_mgr=reputation_mgr,
             dispute_router_inst=dispute_router,
+            kms=kms,
+            budget_tracker=budget_tracker,
+            vector_index_manager=vector_index_manager,
         )
 
         scheduler_task = asyncio.create_task(scheduler.run())
         dispute_scheduler_task = asyncio.create_task(dispute_scheduler.run())
+
+        if patrol_scheduler is not None:
+            patrol_scheduler_task = asyncio.create_task(patrol_scheduler.run())
 
         # Build identity env for the TS proxy subprocess
         identity_env: dict[str, str] = {
@@ -477,7 +502,7 @@ async def bootstrap() -> None:  # noqa: C901
 
     except Exception:
         logger.exception("Phase 5 failed")
-        for task in (scheduler_task, dispute_scheduler_task, server_task):
+        for task in (scheduler_task, dispute_scheduler_task, patrol_scheduler_task, server_task):
             if task is not None:
                 task.cancel()
         await _teardown(resources)
@@ -496,6 +521,8 @@ async def bootstrap() -> None:  # noqa: C901
         wallet=wallet,
         identity=identity,
         ts_proxy=ts_proxy,
+        patrol_scheduler=patrol_scheduler,
+        patrol_scheduler_task=patrol_scheduler_task,
     )
 
 
