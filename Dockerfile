@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build TypeScript proxy
 # ---------------------------------------------------------------------------
-FROM node:22-slim AS ts-builder
+FROM --platform=linux/amd64 node:22-slim AS ts-builder
 
 WORKDIR /app/github-proxy
 COPY github-proxy/package.json github-proxy/package-lock.json* ./

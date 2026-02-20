@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 _MAX_PATTERN_LEN = 1000
@@ -63,37 +65,56 @@ def _normalize_pattern(snippet: str) -> str:
     return result[:_MAX_PATTERN_LEN]
 
 
+def cosine_similarity_vectors(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two numpy vectors.
+
+    Raises ``ValueError`` on dimension mismatch.
+    Returns ``0.0`` for zero-norm or NaN-containing vectors.
+    """
+    if a.shape != b.shape:
+        raise ValueError(
+            f"Dimension mismatch: {a.shape} vs {b.shape}"
+        )
+    if np.isnan(a).any() or np.isnan(b).any():
+        return 0.0
+    norm_a = float(np.linalg.norm(a))
+    norm_b = float(np.linalg.norm(b))
+    if norm_a == 0.0 or norm_b == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (norm_a * norm_b))
+
+
 def cosine_similarity(a: bytes, b: bytes) -> float:
     """Compute cosine similarity between two float32 blob vectors.
 
     Returns 0.0 for zero-norm vectors, mismatched sizes, or invalid blobs.
     """
-    # Fix #8: Guard against mismatched sizes and non-float32-aligned blobs
     if len(a) != len(b) or len(a) == 0 or len(a) % 4 != 0:
         return 0.0
 
-    import numpy as np  # noqa: PLC0415
-
     va = np.frombuffer(a, dtype=np.float32)
     vb = np.frombuffer(b, dtype=np.float32)
-
-    norm_a = np.linalg.norm(va)
-    norm_b = np.linalg.norm(vb)
-    if norm_a == 0.0 or norm_b == 0.0:
+    try:
+        return cosine_similarity_vectors(va, vb)
+    except ValueError:
         return 0.0
 
-    return float(np.dot(va, vb) / (norm_a * norm_b))
+
+def ndarray_to_blob(vec: np.ndarray) -> bytes:
+    """Serialize a numpy vector to a float32 bytes blob."""
+    return vec.astype(np.float32).tobytes()
+
+
+def blob_to_ndarray(blob: bytes) -> np.ndarray:
+    """Deserialize a float32 bytes blob to a writable numpy array."""
+    return np.frombuffer(blob, dtype=np.float32).copy()
 
 
 def vector_to_blob(vec: list[float]) -> bytes:
-    """Serialize a float vector to a SQLite-storable bytes blob."""
-    import numpy as np  # noqa: PLC0415
-
+    """Serialize a float list to a SQLite-storable bytes blob."""
     return np.array(vec, dtype=np.float32).tobytes()
 
 
 def blob_to_vector(blob: bytes) -> list[float]:
-    """Deserialize a float32 blob back into a Python list."""
-    import numpy as np  # noqa: PLC0415
-
+    """Deserialize a float32 blob back into a Python float list."""
     return np.frombuffer(blob, dtype=np.float32).tolist()

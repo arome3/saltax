@@ -140,6 +140,7 @@ async def github_webhook(
                 github_client=request.app.state.github_client,
                 intel_db=request.app.state.intel_db,
                 config=request.app.state.config,
+                env=request.app.state.env,
             )
 
         return Response(status_code=200, content="OK")

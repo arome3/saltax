@@ -35,7 +35,9 @@ def _make_app() -> FastAPI:
     app.state.pipeline = AsyncMock()
     app.state.github_client = AsyncMock()
     app.state.intel_db = AsyncMock()
-    app.state.config = MagicMock()
+    config_mock = MagicMock()
+    config_mock.triage.enabled = False  # match default; prevents dedup from running with mocks
+    app.state.config = config_mock
 
     return app
 

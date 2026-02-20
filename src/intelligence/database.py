@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 8
+_CURRENT_SCHEMA_VERSION = 9
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -153,14 +153,15 @@ CREATE TABLE IF NOT EXISTS verification_windows (
 );
 
 CREATE TABLE IF NOT EXISTS pr_embeddings (
-    id           TEXT PRIMARY KEY,
-    pr_id        TEXT NOT NULL,
-    repo         TEXT NOT NULL,
-    pr_number    INTEGER,
-    commit_sha   TEXT NOT NULL,
-    embedding    BLOB NOT NULL,
-    issue_number INTEGER,
-    created_at   TEXT NOT NULL
+    id              TEXT PRIMARY KEY,
+    pr_id           TEXT NOT NULL,
+    repo            TEXT NOT NULL,
+    pr_number       INTEGER,
+    commit_sha      TEXT NOT NULL,
+    embedding       BLOB NOT NULL,
+    embedding_model TEXT NOT NULL DEFAULT '',
+    issue_number    INTEGER,
+    created_at      TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS vision_documents (
@@ -218,6 +219,7 @@ CREATE INDEX IF NOT EXISTS idx_ab_status ON active_bounties(status);
 CREATE INDEX IF NOT EXISTS idx_vw_status ON verification_windows(status);
 CREATE INDEX IF NOT EXISTS idx_vw_closes_at ON verification_windows(closes_at);
 CREATE INDEX IF NOT EXISTS idx_pe_repo ON pr_embeddings(repo);
+CREATE INDEX IF NOT EXISTS idx_pe_repo_created ON pr_embeddings(repo, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_vd_repo ON vision_documents(repo);
 CREATE INDEX IF NOT EXISTS idx_dr_status ON dispute_records(status);
 CREATE INDEX IF NOT EXISTS idx_dr_window ON dispute_records(window_id);
@@ -479,6 +481,17 @@ class IntelligenceDB:
                                 f"ALTER TABLE attestation_store "
                                 f"ADD COLUMN {col_name} {col_def}",
                             )
+                    await db.commit()
+                if current < 9:
+                    with contextlib.suppress(sqlite3.OperationalError):
+                        await db.execute(
+                            "ALTER TABLE pr_embeddings "
+                            "ADD COLUMN embedding_model TEXT NOT NULL DEFAULT ''",
+                        )
+                    await db.execute(
+                        "CREATE INDEX IF NOT EXISTS idx_pe_repo_created "
+                        "ON pr_embeddings(repo, created_at DESC)",
+                    )
                     await db.commit()
                 await db.execute(
                     "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
@@ -1528,21 +1541,25 @@ class IntelligenceDB:
         commit_sha: str,
         embedding_blob: bytes,
         issue_number: int | None = None,
+        embedding_model: str = "",
     ) -> None:
-        """Store or replace a PR embedding."""
+        """Store a PR embedding, updating on conflict to preserve created_at."""
         db = self._require_db()
         now = datetime.now(UTC).isoformat()
         emb_id = hashlib.sha256(f"{pr_id}-{commit_sha}".encode()).hexdigest()[:16]
         async with self._write_lock:
             await db.execute(
                 """\
-                INSERT OR REPLACE INTO pr_embeddings
+                INSERT INTO pr_embeddings
                     (id, pr_id, repo, pr_number, commit_sha, embedding,
-                     issue_number, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                     embedding_model, issue_number, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    embedding = excluded.embedding,
+                    embedding_model = excluded.embedding_model
                 """,
                 (emb_id, pr_id, repo, pr_number, commit_sha,
-                 embedding_blob, issue_number, now),
+                 embedding_blob, embedding_model, issue_number, now),
             )
             await db.commit()
 
@@ -1585,3 +1602,68 @@ class IntelligenceDB:
 
         results.sort(key=lambda x: x["similarity"], reverse=True)
         return results[:limit]
+
+    async def get_recent_embeddings(
+        self,
+        repo: str,
+        exclude_pr_number: int | None = None,
+        limit: int = 200,
+        embedding_model: str = "",
+    ) -> list[dict[str, object]]:
+        """Fetch recent embeddings for a repo, optionally excluding one PR.
+
+        When *embedding_model* is non-empty, only rows matching that model
+        are returned — prevents comparing vectors from different models.
+
+        Returns raw rows as dicts with ``pr_id``, ``pr_number``,
+        ``commit_sha``, and ``embedding`` (bytes blob).  Read-only — no
+        ``_write_lock`` required.
+        """
+        db = self._require_db()
+
+        # Four SQL branches: with/without exclude, with/without model filter.
+        # All use parameterized queries — no f-strings.
+        if exclude_pr_number is not None and embedding_model:
+            async with db.execute(
+                "SELECT pr_id, pr_number, commit_sha, embedding "
+                "FROM pr_embeddings "
+                "WHERE repo = ? AND pr_number != ? AND embedding_model = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (repo, exclude_pr_number, embedding_model, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        elif exclude_pr_number is not None:
+            async with db.execute(
+                "SELECT pr_id, pr_number, commit_sha, embedding "
+                "FROM pr_embeddings WHERE repo = ? AND pr_number != ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (repo, exclude_pr_number, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        elif embedding_model:
+            async with db.execute(
+                "SELECT pr_id, pr_number, commit_sha, embedding "
+                "FROM pr_embeddings "
+                "WHERE repo = ? AND embedding_model = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (repo, embedding_model, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        else:
+            async with db.execute(
+                "SELECT pr_id, pr_number, commit_sha, embedding "
+                "FROM pr_embeddings WHERE repo = ? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (repo, limit),
+            ) as cursor:
+                rows = await cursor.fetchall()
+
+        return [
+            {
+                "pr_id": row[0],
+                "pr_number": row[1],
+                "commit_sha": row[2],
+                "embedding": row[3],
+            }
+            for row in rows
+        ]

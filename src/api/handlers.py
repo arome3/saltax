@@ -11,7 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from src.config import SaltaXConfig
+    from src.config import EnvConfig, SaltaXConfig
     from src.github.client import GitHubClient
     from src.intelligence.database import IntelligenceDB
     from src.pipeline.runner import Pipeline
@@ -26,6 +26,7 @@ async def handle_pr_event(
     github_client: GitHubClient,
     intel_db: IntelligenceDB,
     config: SaltaXConfig,
+    env: EnvConfig | None = None,
 ) -> None:
     """Process a pull-request event through the analysis pipeline.
 
@@ -103,7 +104,38 @@ async def handle_pr_event(
             "pr_author_wallet": contributor_wallet,
             "bounty_amount_wei": bounty_amount_wei,
             "is_self_modification": is_self_mod,
+            "action": action,
         }
+
+        # ── Triage dedup gate (advisory only) ───────────────────────
+        if (
+            env is not None
+            and config.triage.enabled
+            and config.triage.dedup.enabled
+        ):
+            try:
+                from src.triage.dedup import (  # noqa: PLC0415
+                    post_dedup_comment,
+                    run_dedup_check,
+                )
+
+                duplicates = await run_dedup_check(
+                    state_dict, config, env, intel_db,
+                )
+                state_dict["duplicate_candidates"] = duplicates
+                if duplicates and (
+                    action == "opened"
+                    or config.triage.dedup.comment_on_synchronize
+                ):
+                    await post_dedup_comment(
+                        state_dict, duplicates, github_client,
+                    )
+            except Exception:
+                logger.warning(
+                    "Dedup gate failed, continuing pipeline",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
 
         state = await pipeline.run(state_dict)
 

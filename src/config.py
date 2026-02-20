@@ -210,6 +210,9 @@ class DedupConfig(BaseModel):
     enabled: bool = True
     similarity_threshold: float = Field(default=0.85, ge=0.5, le=0.99)
     embedding_model: str = "text-embedding"
+    embedding_api_timeout_seconds: int = Field(default=30, gt=0)
+    max_scan_embeddings: int = Field(default=200, ge=10, le=10000)
+    comment_on_synchronize: bool = False
 
 
 class RankingConfig(BaseModel):
