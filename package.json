@@ -4,11 +4,14 @@
   "private": true,
   "description": "SaltaX — sovereign AI agent monorepo",
   "workspaces": [
-    "github-proxy"
+    "github-proxy",
+    "frontend"
   ],
   "scripts": {
     "build:proxy": "cd github-proxy && npm run build",
-    "start:proxy": "cd github-proxy && npm start"
+    "start:proxy": "cd github-proxy && npm start",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:frontend": "cd frontend && npm run build"
   },
   "engines": {
     "node": ">=22.0.0"
