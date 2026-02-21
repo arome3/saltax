@@ -26,6 +26,8 @@ from contextlib import suppress
 from typing import Any
 
 import uvicorn
+from web3 import AsyncWeb3
+from web3.providers import AsyncHTTPProvider
 
 from src.api.app import create_app
 from src.api.middleware.tx_store import TxHashStore
@@ -55,6 +57,42 @@ from src.verification.scheduler import VerificationScheduler
 logger = logging.getLogger("saltax.bootstrap")
 
 _SHUTDOWN_TIMEOUT = 30.0
+
+# Ownable2Step function selectors (keccak256 of signature, first 4 bytes)
+_ACCEPT_OWNERSHIP_SELECTOR = bytes.fromhex("79ba5097")
+_PENDING_OWNER_SELECTOR = bytes.fromhex("e30c3978")
+
+
+async def _try_accept_ownership(
+    wallet: WalletManager,
+    contract_address: str,
+    label: str,
+) -> None:
+    """Accept pending ownership on an Ownable2Step contract if this wallet is pendingOwner.
+
+    Idempotent: no-ops if wallet is not the pending owner or if the call fails.
+    """
+    try:
+        w3 = AsyncWeb3(AsyncHTTPProvider(wallet._rpc_url))
+        result = await w3.eth.call({
+            "to": AsyncWeb3.to_checksum_address(contract_address),
+            "data": _PENDING_OWNER_SELECTOR,
+        })
+        raw_hex = result[-20:].hex()
+        pending = AsyncWeb3.to_checksum_address(raw_hex if raw_hex.startswith("0x") else "0x" + raw_hex)
+        if pending.lower() != (wallet.address or "").lower():
+            return  # not the pending owner — nothing to do
+        tx_hash = await wallet.send_transaction(
+            to=AsyncWeb3.to_checksum_address(contract_address),
+            value_wei=0,
+            data=_ACCEPT_OWNERSHIP_SELECTOR,
+            gas=60_000,
+        )
+        logger.info(
+            "Accepted ownership of %s contract: tx=%s", label, tx_hash
+        )
+    except Exception:
+        logger.debug("acceptOwnership skipped for %s", label, exc_info=True)
 
 
 # ── TS proxy subprocess manager ──────────────────────────────────────────────
@@ -402,6 +440,9 @@ async def bootstrap() -> None:  # noqa: C901
         if config.staking.enabled and config.staking.contract_address:
             await staking_contract.initialize()
             resources.append(("staking_contract", staking_contract))
+            await _try_accept_ownership(wallet, config.staking.contract_address, "Staking")
+        if config.treasury.contract_address:
+            await _try_accept_ownership(wallet, config.treasury.contract_address, "Treasury")
         stake_resolver = StakeResolver(staking_contract, staking_economics)
         dispute_router = DisputeRouter(
             config.disputes, intel_db, eigen_client, molt_client,

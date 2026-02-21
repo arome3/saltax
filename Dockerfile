@@ -10,8 +10,8 @@
 FROM --platform=linux/amd64 node:22-slim AS ts-builder
 
 WORKDIR /app/github-proxy
-COPY github-proxy/package.json github-proxy/package-lock.json* ./
-RUN npm ci --production=false
+COPY github-proxy/package.json ./
+RUN npm install
 COPY github-proxy/tsconfig.json ./
 COPY github-proxy/src ./src
 RUN npx tsc
@@ -48,10 +48,6 @@ COPY github-proxy/package.json ./github-proxy/
 COPY rules/ ./rules/
 COPY saltax.config.yaml ./
 COPY scripts/ ./scripts/
-
-# Non-root user (defense-in-depth alongside TEE isolation)
-RUN useradd -m saltax
-USER saltax
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

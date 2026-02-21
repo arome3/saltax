@@ -15,11 +15,11 @@ pipeline:
     ai_analyzer:
       enabled: true
       model: "gpt-oss-120b-f16"
-      timeout_seconds: 60
+      timeout_seconds: 120
       semaphore_timeout_seconds: 30
     test_executor:
       enabled: true
-      timeout_seconds: 300
+      timeout_seconds: 120
       memory_limit_mb: 512
     decision_engine:
       weights:
@@ -34,6 +34,7 @@ treasury:
   bounty_budget: 0.65
   community_fund: 0.05
   max_single_payout_eth: 0.5
+  contract_address: "0x3F30232309A9580325F5060B7f5fd22645F50442"
 
 bounties:
   labels:
@@ -44,12 +45,14 @@ bounties:
     "bounty-xl": 0.50
 
 optimistic_verification:
-  standard_window_hours: 24
-  self_modification_window_hours: 72
+  standard_window_hours: 0.033
+  self_modification_window_hours: 0.1
+  check_interval_seconds: 10
   min_challenge_stake_multiplier: 1.0
 
 staking:
   enabled: true
+  contract_address: "0x3B255d624E467F371C0E56fC86ea09fd8A28001e"
   bonus_rate_no_challenge: 0.10
   bonus_rate_challenged_upheld: 0.20
   slash_rate_challenged_overturned: 0.50
@@ -60,7 +63,7 @@ audit_pricing:
   full_audit_usdc: 10
 
 triage:
-  enabled: false
+  enabled: true
   mode: "autonomous"
   dedup:
     enabled: true
