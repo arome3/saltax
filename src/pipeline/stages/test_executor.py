@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 # ── Constants ────────────────────────────────────────────────────────────────
 
 _CLONE_TIMEOUT = 60  # seconds
-_INSTALL_TIMEOUT = 120  # seconds
+_INSTALL_TIMEOUT = 180  # seconds (pip with native extensions can be slow)
+_INSTALL_MEMORY_MULTIPLIER = 4  # install phase gets N× the test memory budget
 _STDERR_TAIL_LEN = 10_000
 _STDOUT_TAIL_LEN = 10_000
 _GRACEFUL_KILL_WAIT = 5  # seconds
@@ -195,28 +196,43 @@ def _detect_js_install_cmd(repo_dir: Path) -> list[str]:
 async def _install_deps(
     lang: _LangConfig, repo_dir: Path, tmp_dir: str, *, memory_mb: int = 512,
 ) -> None:
-    """Install dependencies; try fallback command on failure."""
+    """Install dependencies; try fallback command on failure.
+
+    The install phase uses a higher memory limit than the test phase because
+    ``pip`` dependency resolution and native wheel compilation can temporarily
+    require significantly more memory than test execution.
+    """
     env = _subprocess_env(tmp_dir)
+    install_mem = memory_mb * _INSTALL_MEMORY_MULTIPLIER
     install_cmd = lang.install_cmd
     if lang.name == "nodejs":
         install_cmd = _detect_js_install_cmd(repo_dir)
-    rc = await asyncio.wait_for(
-        _run_cmd(install_cmd, repo_dir, env, memory_mb=memory_mb),
+    rc, stderr = await asyncio.wait_for(
+        _run_cmd(install_cmd, repo_dir, env, memory_mb=install_mem),
         timeout=_INSTALL_TIMEOUT,
     )
     if rc != 0 and lang.install_fallback is not None:
         logger.warning(
-            "%s install failed (rc=%d), trying fallback", lang.name, rc,
+            "%s install failed (rc=%d): %s — trying fallback",
+            lang.name, rc, stderr[-500:] if stderr else "(no stderr)",
         )
-        rc = await asyncio.wait_for(
-            _run_cmd(lang.install_fallback, repo_dir, env, memory_mb=memory_mb),
+        rc, stderr = await asyncio.wait_for(
+            _run_cmd(lang.install_fallback, repo_dir, env, memory_mb=install_mem),
             timeout=_INSTALL_TIMEOUT,
         )
         if rc != 0:
+            logger.error(
+                "%s install fallback also failed (rc=%d): %s",
+                lang.name, rc, stderr[-500:] if stderr else "(no stderr)",
+            )
             raise RuntimeError(
                 f"{lang.name} install fallback failed with exit code {rc}"
             )
     elif rc != 0:
+        logger.error(
+            "%s install failed (rc=%d): %s",
+            lang.name, rc, stderr[-500:] if stderr else "(no stderr)",
+        )
         raise RuntimeError(
             f"{lang.name} install failed with exit code {rc}"
         )
@@ -224,22 +240,27 @@ async def _install_deps(
 
 async def _run_cmd(
     cmd: list[str], cwd: Path, env: dict[str, str], *, memory_mb: int = 512,
-) -> int:
-    """Execute *cmd* and return its exit code. Output is discarded."""
+) -> tuple[int, str]:
+    """Execute *cmd* and return ``(exit_code, stderr_tail)``.
+
+    Stdout is discarded.  Stderr is captured via ``communicate()`` and
+    tail-truncated for diagnostic logging when the command fails.
+    """
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(cwd),
         env=env,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
         preexec_fn=_set_resource_limits(memory_mb),
     )
     try:
-        await proc.wait()
+        _, stderr_bytes = await proc.communicate()
     except BaseException:
         await _graceful_kill(proc)
         raise
-    return proc.returncode or 0
+    stderr_text = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+    return proc.returncode or 0, _smart_truncate(stderr_text, _STDERR_TAIL_LEN)
 
 
 async def _run_test_suite(

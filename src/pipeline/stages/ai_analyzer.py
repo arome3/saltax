@@ -167,7 +167,9 @@ async def _get_grant_credentials(
 
     signable = encode_defunct(text=grant_message)
     signed = Account.sign_message(signable, private_key=env.eigenai_wallet_private_key)
-    signature = "0x" + signed.signature.hex()
+    raw_hex = signed.signature.hex()
+    # HexBytes.hex() may include "0x" prefix depending on library version
+    signature = raw_hex if raw_hex.startswith("0x") else ("0x" + raw_hex)
 
     _grant_cache[address] = (grant_message, signature)
     logger.info("Determinal grant credentials cached for %s", address[:10])
