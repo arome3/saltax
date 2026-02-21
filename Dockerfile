@@ -21,10 +21,15 @@ RUN npx tsc
 # ---------------------------------------------------------------------------
 FROM --platform=linux/amd64 python:3.11-slim
 
-# System dependencies
+# System dependencies — includes build tools for native Python extension
+# compilation when the test executor runs pip install on cloned repositories.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
+    build-essential \
+    python3-dev \
+    libffi-dev \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js binary from stage 1 (exact v22 — avoids stale Debian apt packages)
