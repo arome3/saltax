@@ -26,13 +26,13 @@ from tests.conftest import REQUIRED_ENV_VARS, VALID_YAML
 
 class TestConfigureLogging:
     def test_installs_json_handler(self) -> None:
-        """After configure_logging(), root logger has a JSON-formatted handler."""
+        """After configure_logging(), root logger has JSON + WebSocket handlers."""
         configure_logging()
         root = logging.getLogger()
-        assert len(root.handlers) == 1
-        handler = root.handlers[0]
-        assert handler.formatter is not None
-        assert "JsonFormatter" in type(handler.formatter).__name__
+        assert len(root.handlers) == 2
+        stream_handler = root.handlers[0]
+        assert stream_handler.formatter is not None
+        assert "JsonFormatter" in type(stream_handler.formatter).__name__
 
     def test_reads_env_var_log_level(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """SALTAX_LOG_LEVEL env var sets the root logger level."""
@@ -53,7 +53,7 @@ class TestConfigureLogging:
         root.addHandler(logging.StreamHandler())
         assert len(root.handlers) >= 2
         configure_logging()
-        assert len(root.handlers) == 1
+        assert len(root.handlers) == 2
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

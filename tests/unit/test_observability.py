@@ -132,10 +132,10 @@ class TestConfigureLogging:
     """Verify configure_logging installs filter, reads env, is idempotent."""
 
     def test_filter_installed(self) -> None:
-        """The root logger's handler has a SensitiveFieldFilter."""
+        """The root logger's handlers have a SensitiveFieldFilter."""
         configure_logging()
         root = logging.getLogger()
-        assert len(root.handlers) == 1
+        assert len(root.handlers) == 2
         handler = root.handlers[0]
         filter_types = [type(f) for f in handler.filters]
         assert SensitiveFieldFilter in filter_types
@@ -148,11 +148,11 @@ class TestConfigureLogging:
         assert root.level == logging.DEBUG
 
     def test_idempotent_call(self) -> None:
-        """Double call leaves exactly one handler (clears first)."""
+        """Double call leaves exactly two handlers (clears first)."""
         configure_logging()
         configure_logging()
         root = logging.getLogger()
-        assert len(root.handlers) == 1
+        assert len(root.handlers) == 2
 
 
 # ── TestJsonOutput ───────────────────────────────────────────────────────────

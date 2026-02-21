@@ -8,9 +8,11 @@ leakage in structured log output.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 
 # ── Sensitive field patterns ─────────────────────────────────────────────────
 
@@ -65,6 +67,40 @@ class SensitiveFieldFilter(logging.Filter):
         return True
 
 
+# ── WebSocket broadcast handler ──────────────────────────────────────────────
+
+
+class WebSocketBroadcastHandler(logging.Handler):
+    """Logging handler that pushes structured events to WebSocket clients.
+
+    Uses ``asyncio.create_task`` to avoid blocking the logger.
+    Silently ignores errors when no event loop is running.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return  # No event loop — skip broadcast
+
+        event = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        # Include extra fields (excluding standard LogRecord attributes)
+        for key in ("repo", "pr_id", "pr_number", "action", "stage",
+                     "duration_ms", "component", "status"):
+            val = getattr(record, key, None)
+            if val is not None:
+                event[key] = val
+
+        from src.api.routes.ws_logs import broadcast_log  # noqa: PLC0415
+
+        loop.create_task(broadcast_log(event))
+
+
 # ── Formatter construction ───────────────────────────────────────────────────
 
 
@@ -106,8 +142,13 @@ def configure_logging() -> None:
     handler.setFormatter(formatter)
     handler.addFilter(SensitiveFieldFilter())
 
+    ws_handler = WebSocketBroadcastHandler()
+    ws_handler.setLevel(logging.INFO)
+    ws_handler.addFilter(SensitiveFieldFilter())
+
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
+    root.addHandler(ws_handler)
     root.setLevel(level)
 
