@@ -34,6 +34,7 @@ import logging
 import uuid
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from src.verification.window import (
@@ -51,6 +52,23 @@ if TYPE_CHECKING:
     from src.treasury.manager import TreasuryManager
 
 logger = logging.getLogger(__name__)
+
+# Name of SaltaX's own check run — must match src/github/checks.py:_CHECK_NAME
+_OWN_CHECK_NAME = "SaltaX Pipeline"
+
+# Check-run conclusions treated as passing (matches Bulldozer's allowedCheckConclusions)
+_PASSING_CONCLUSIONS = frozenset({"success", "neutral", "skipped"})
+
+
+class CIGateResult(StrEnum):
+    """Outcome of the pre-merge CI status check."""
+
+    PASSED = "passed"
+    FAILED = "failed"
+    PENDING = "pending"
+    NO_CI = "no_ci"
+    GATE_DISABLED = "gate_disabled"
+    API_ERROR = "api_error"
 
 
 class VerificationScheduler:
@@ -234,6 +252,22 @@ class VerificationScheduler:
         pr_number = int(window["pr_number"])  # type: ignore[arg-type]
         installation_id = int(window["installation_id"])  # type: ignore[arg-type]
 
+        # CI gate: block merge if external CI is failing or still running
+        ci_result = await self._check_ci_status(repo, pr_number, installation_id)
+        if ci_result in (CIGateResult.PENDING, CIGateResult.FAILED):
+            logger.info(
+                "CI gate blocked merge, reverting to open",
+                extra={
+                    "window_id": window_id,
+                    "pr_number": pr_number,
+                    "ci_result": ci_result.value,
+                },
+            )
+            await self._intel_db.transition_window_status(
+                window_id, "executing", "open",
+            )
+            return
+
         try:
             await self._github_client.merge_pr(
                 repo, pr_number, installation_id,
@@ -275,6 +309,22 @@ class VerificationScheduler:
         repo = str(window["repo"])
         pr_number = int(window["pr_number"])  # type: ignore[arg-type]
         installation_id = int(window["installation_id"])  # type: ignore[arg-type]
+
+        # CI gate: block merge if external CI is failing or still running
+        ci_result = await self._check_ci_status(repo, pr_number, installation_id)
+        if ci_result in (CIGateResult.PENDING, CIGateResult.FAILED):
+            logger.info(
+                "CI gate blocked self-merge, reverting to open",
+                extra={
+                    "window_id": window_id,
+                    "pr_number": pr_number,
+                    "ci_result": ci_result.value,
+                },
+            )
+            await self._intel_db.transition_window_status(
+                window_id, "executing", "open",
+            )
+            return
 
         async with _self_merge_lock:
             # 1. Create backup
@@ -420,6 +470,131 @@ class VerificationScheduler:
                 extra={"window_id": window["id"]},
             )
 
+    # ── CI gate ───────────────────────────────────────────────────────────
+
+    async def _check_ci_status(
+        self,
+        repo: str,
+        pr_number: int,
+        installation_id: int,
+    ) -> CIGateResult:
+        """Check external CI status for a PR before merging.
+
+        Mirrors Bulldozer's dual-API approach: queries both the Check Runs
+        API (GitHub Actions) and the combined Status API (legacy CI tools).
+        Filters out SaltaX's own check run to avoid self-referential gating.
+
+        Returns a :class:`CIGateResult` indicating whether to proceed.
+        """
+        if not self._config.verification.require_ci_pass:
+            return CIGateResult.GATE_DISABLED
+
+        # 1. Fetch PR to get HEAD SHA
+        try:
+            pr_data = await self._github_client.get_pr(
+                repo, pr_number, installation_id,
+            )
+            head_sha: str = pr_data["head"]["sha"]
+        except Exception:
+            logger.warning(
+                "CI gate: failed to fetch PR, proceeding with merge (fail-open)",
+                extra={"repo": repo, "pr_number": pr_number},
+            )
+            return CIGateResult.API_ERROR
+
+        # 2. Fetch check runs + combined status in parallel
+        try:
+            check_runs_result, combined_status = await asyncio.gather(
+                self._github_client.list_check_runs_for_ref(
+                    repo, head_sha, installation_id,
+                ),
+                self._github_client.get_combined_status_for_ref(
+                    repo, head_sha, installation_id,
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "CI gate: failed to fetch CI status, proceeding with merge (fail-open)",
+                extra={"repo": repo, "pr_number": pr_number, "head_sha": head_sha},
+            )
+            return CIGateResult.API_ERROR
+
+        # 3. Filter out our own check run
+        external_checks = [
+            cr for cr in check_runs_result
+            if cr.get("name") != _OWN_CHECK_NAME
+        ]
+
+        # 4. Evaluate combined status API
+        status_state = combined_status.get("state", "")
+        status_count = int(combined_status.get("total_count", 0))
+
+        has_external_checks = len(external_checks) > 0
+        has_status_checks = status_count > 0
+
+        # 5. If no external checks at all → NO_CI (don't block repos without CI)
+        if not has_external_checks and not has_status_checks:
+            logger.debug(
+                "CI gate: no external CI checks found",
+                extra={"repo": repo, "pr_number": pr_number},
+            )
+            return CIGateResult.NO_CI
+
+        # 6. Check for pending/in-progress states
+        for cr in external_checks:
+            cr_status = cr.get("status", "")
+            if cr_status in ("queued", "in_progress"):
+                logger.info(
+                    "CI gate: check run still running",
+                    extra={
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "check_name": cr.get("name"),
+                        "status": cr_status,
+                    },
+                )
+                return CIGateResult.PENDING
+
+        if has_status_checks and status_state == "pending":
+            logger.info(
+                "CI gate: combined status pending",
+                extra={"repo": repo, "pr_number": pr_number},
+            )
+            return CIGateResult.PENDING
+
+        # 7. Check for failures
+        for cr in external_checks:
+            conclusion = cr.get("conclusion", "")
+            if conclusion and conclusion not in _PASSING_CONCLUSIONS:
+                logger.info(
+                    "CI gate: check run failed",
+                    extra={
+                        "repo": repo,
+                        "pr_number": pr_number,
+                        "check_name": cr.get("name"),
+                        "conclusion": conclusion,
+                    },
+                )
+                return CIGateResult.FAILED
+
+        if has_status_checks and status_state in ("failure", "error"):
+            logger.info(
+                "CI gate: combined status failed",
+                extra={
+                    "repo": repo,
+                    "pr_number": pr_number,
+                    "state": status_state,
+                },
+            )
+            return CIGateResult.FAILED
+
+        # 8. All checks passed
+        logger.info(
+            "CI gate: all checks passed",
+            extra={"repo": repo, "pr_number": pr_number},
+        )
+        return CIGateResult.PASSED
+
     # ── Challenge management ─────────────────────────────────────────────
 
     async def file_challenge(
@@ -526,6 +701,22 @@ class VerificationScheduler:
         repo = str(window["repo"])
         pr_number = int(window["pr_number"])  # type: ignore[arg-type]
         installation_id = int(window["installation_id"])  # type: ignore[arg-type]
+
+        # CI gate: block merge if external CI is failing or still running
+        ci_result = await self._check_ci_status(repo, pr_number, installation_id)
+        if ci_result in (CIGateResult.PENDING, CIGateResult.FAILED):
+            logger.info(
+                "CI gate blocked upheld merge, reverting to challenged",
+                extra={
+                    "window_id": window_id,
+                    "pr_number": pr_number,
+                    "ci_result": ci_result.value,
+                },
+            )
+            await self._intel_db.transition_window_status(
+                window_id, "resolving", "challenged",
+            )
+            return (False, f"CI gate: {ci_result.value}")
 
         try:
             await self._github_client.merge_pr(

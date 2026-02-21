@@ -81,6 +81,54 @@ def _parse_issue_event(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _handle_check_run_completed(
+    *,
+    scheduler: object,
+    intel_db: object,
+    repo: str,
+    pr_number: int,
+) -> None:
+    """Trigger merge for PRs with expired verification windows when CI completes.
+
+    This is the event-driven complement to the scheduler's polling CI gate.
+    When a ``check_run`` event with ``action: "completed"`` arrives, we check
+    if any associated PR has an expired open window waiting for CI, and if so,
+    trigger an immediate execution rather than waiting for the next tick.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    try:
+        now_iso = datetime.now(UTC).isoformat()
+        expired = await intel_db.get_expired_open_windows(now_iso)  # type: ignore[union-attr]
+
+        matching = [
+            w for w in expired
+            if str(w.get("repo")) == repo and int(w.get("pr_number", 0)) == pr_number
+        ]
+
+        for window in matching:
+            logger.info(
+                "check_run completed → triggering merge for expired window",
+                extra={
+                    "window_id": window["id"],
+                    "repo": repo,
+                    "pr_number": pr_number,
+                },
+            )
+            try:
+                await scheduler._execute_window(window)  # type: ignore[union-attr]
+            except Exception:
+                logger.exception(
+                    "check_run triggered merge failed",
+                    extra={"window_id": window["id"]},
+                )
+    except Exception:
+        logger.exception(
+            "check_run handler error",
+            extra={"repo": repo, "pr_number": pr_number},
+        )
+
+
 @router.post("/webhook/github")
 async def github_webhook(
     request: Request,
@@ -207,6 +255,42 @@ async def github_webhook(
                     vector_index_manager=getattr(
                         request.app.state, "vector_index_manager", None,
                     ),
+                )
+
+            return Response(status_code=200, content="OK")
+
+        if event_type == "check_run" and payload.get("action") == "completed":
+            check_run = payload.get("check_run", {})
+            pr_list = check_run.get("pull_requests", [])
+
+            if pr_list:
+                scheduler = getattr(request.app.state, "scheduler", None)
+                intel_db = getattr(request.app.state, "intel_db", None)
+
+                if scheduler is not None and intel_db is not None:
+                    for pr in pr_list:
+                        pr_number = pr.get("number")
+                        repo_full_name = (
+                            payload.get("repository", {}).get("full_name", "")
+                        )
+                        if not pr_number or not repo_full_name:
+                            continue
+
+                        background_tasks.add_task(
+                            _handle_check_run_completed,
+                            scheduler=scheduler,
+                            intel_db=intel_db,
+                            repo=repo_full_name,
+                            pr_number=pr_number,
+                        )
+
+                logger.info(
+                    "check_run.completed dispatched",
+                    extra={
+                        "check_name": check_run.get("name"),
+                        "conclusion": check_run.get("conclusion"),
+                        "pr_count": len(pr_list),
+                    },
                 )
 
             return Response(status_code=200, content="OK")

@@ -157,6 +157,7 @@ class VerificationConfig(BaseModel):
     min_challenge_stake_multiplier: float = Field(default=1.0, ge=0.0)
     check_interval_seconds: int = Field(default=60, gt=0)
     challenge_resolution_deadline_hours: float = Field(default=168, gt=0)  # 7 days
+    require_ci_pass: bool = True
 
 
 # ── Staking ──────────────────────────────────────────────────────────────────

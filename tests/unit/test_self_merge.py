@@ -649,6 +649,11 @@ class TestSchedulerSelfMerge:
 
         mock_github = AsyncMock()
         mock_github.merge_pr = AsyncMock(return_value={"merged": True})
+        mock_github.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
+        mock_github.list_check_runs_for_ref = AsyncMock(return_value=[])
+        mock_github.get_combined_status_for_ref = AsyncMock(
+            return_value={"state": "", "total_count": 0},
+        )
         mock_treasury = AsyncMock()
         mock_treasury.send_payout = AsyncMock(
             return_value=MagicMock(tx_hash="0xdead", amount_wei=1000),
@@ -686,6 +691,11 @@ class TestSchedulerSelfMerge:
 
         mock_github = AsyncMock()
         mock_github.merge_pr = AsyncMock(return_value={"merged": True})
+        mock_github.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
+        mock_github.list_check_runs_for_ref = AsyncMock(return_value=[])
+        mock_github.get_combined_status_for_ref = AsyncMock(
+            return_value={"state": "", "total_count": 0},
+        )
         mock_treasury = AsyncMock()
 
         scheduler = VerificationScheduler(
@@ -719,6 +729,11 @@ class TestSchedulerSelfMerge:
 
         mock_github = AsyncMock()
         mock_github.merge_pr = AsyncMock(return_value={"merged": True})
+        mock_github.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
+        mock_github.list_check_runs_for_ref = AsyncMock(return_value=[])
+        mock_github.get_combined_status_for_ref = AsyncMock(
+            return_value={"state": "", "total_count": 0},
+        )
         mock_treasury = AsyncMock()
         mock_treasury.send_payout = AsyncMock(
             return_value=MagicMock(tx_hash="0xdead", amount_wei=1000),

@@ -65,6 +65,7 @@ VALID_YAML = textwrap.dedent("""\
       standard_window_hours: 24
       self_modification_window_hours: 72
       min_challenge_stake_multiplier: 1.0
+      require_ci_pass: true
 
     staking:
       enabled: true
@@ -227,6 +228,12 @@ def mock_github_client() -> AsyncMock:
     client.create_comment = AsyncMock(return_value=None)
     client.merge_pr = AsyncMock(return_value={"merged": True})
     client.add_labels = AsyncMock(return_value=None)
+    # CI gate defaults — no external CI → NO_CI → merge proceeds
+    client.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
+    client.list_check_runs_for_ref = AsyncMock(return_value=[])
+    client.get_combined_status_for_ref = AsyncMock(
+        return_value={"state": "", "total_count": 0},
+    )
     return client
 
 

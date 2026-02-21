@@ -70,6 +70,12 @@ def sample_config() -> SaltaXConfig:
 def mock_github_client():
     client = AsyncMock()
     client.merge_pr = AsyncMock(return_value={"merged": True})
+    # CI gate defaults — no external CI → NO_CI → merge proceeds
+    client.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
+    client.list_check_runs_for_ref = AsyncMock(return_value=[])
+    client.get_combined_status_for_ref = AsyncMock(
+        return_value={"state": "", "total_count": 0},
+    )
     return client
 
 

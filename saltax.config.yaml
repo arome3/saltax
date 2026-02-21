@@ -49,6 +49,7 @@ optimistic_verification:
   self_modification_window_hours: 0.1
   check_interval_seconds: 10
   min_challenge_stake_multiplier: 1.0
+  require_ci_pass: true
 
 staking:
   enabled: true
@@ -68,7 +69,7 @@ triage:
   dedup:
     enabled: true
     similarity_threshold: 0.85
-    embedding_model: "text-embedding"
+    embedding_model: "bge-small-en-v1.5"
   ranking:
     enabled: true
     label_superseded: "superseded"

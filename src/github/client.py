@@ -440,6 +440,64 @@ class GitHubClient:
         result: dict[str, Any] = response.json()
         return result
 
+    async def get_pr(
+        self,
+        repo: str,
+        pr_number: int,
+        installation_id: int,
+    ) -> dict[str, Any]:
+        """Fetch a single pull request's full JSON representation.
+
+        Used by the CI gate to obtain the HEAD SHA for status checks.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/pulls/{pr_number}",
+            installation_id=installation_id,
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
+    async def list_check_runs_for_ref(
+        self,
+        repo: str,
+        ref: str,
+        installation_id: int,
+    ) -> list[dict[str, Any]]:
+        """List check runs for a git reference (SHA, branch, or tag).
+
+        Returns the ``check_runs`` array from the GitHub Check Runs API.
+        GitHub Actions CI results appear here.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/commits/{ref}/check-runs",
+            installation_id=installation_id,
+        )
+        data: dict[str, Any] = response.json()
+        result: list[dict[str, Any]] = data.get("check_runs", [])
+        return result
+
+    async def get_combined_status_for_ref(
+        self,
+        repo: str,
+        ref: str,
+        installation_id: int,
+    ) -> dict[str, Any]:
+        """Fetch the combined commit status for a git reference.
+
+        Older CI tools (Jenkins, CircleCI) report via the Status API
+        rather than Check Runs. Returns the full combined status object
+        including ``state`` and ``total_count``.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/commits/{ref}/status",
+            installation_id=installation_id,
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
     async def create_review(
         self,
         repo: str,
