@@ -18,6 +18,9 @@ import re
 import time
 from typing import TYPE_CHECKING, Any
 
+import httpx
+from eth_account import Account
+from eth_account.messages import encode_defunct
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -80,6 +83,9 @@ _RE_JSON_FENCE = re.compile(
     r"```(?:json)?\s*\n(.*?)\n\s*```", re.DOTALL
 )
 
+# Determinal model channel/message control tokens
+_RE_CHANNEL_TOKENS = re.compile(r"^<\|channel\|>[^<]*<\|message\|>")
+
 # Natural language score patterns
 _RE_QUALITY_NL = re.compile(
     r"[Qq]uality\s+[Ss]core\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*/\s*10"
@@ -125,6 +131,52 @@ def _emit_metric(name: str, value: object, **tags: object) -> None:
         "metric",
         extra={"metric_name": name, "metric_value": value, **tags},
     )
+
+
+# ── Determinal grant auth ────────────────────────────────────────────────────
+
+# Cache: wallet_address → (grant_message, signature)
+_grant_cache: dict[str, tuple[str, str]] = {}
+
+
+def _clear_grant_cache() -> None:
+    """Clear cached grant credentials.  For testing only."""
+    _grant_cache.clear()
+
+
+async def _get_grant_credentials(
+    env: EnvConfig,
+) -> dict[str, str]:
+    """Fetch, sign, and cache Determinal grant credentials.
+
+    Returns the ``extra_body`` dict to pass to the OpenAI SDK's
+    ``chat.completions.create()``.
+    """
+    address = env.eigenai_wallet_address
+    if address in _grant_cache:
+        msg, sig = _grant_cache[address]
+        return {"grantMessage": msg, "grantSignature": sig, "walletAddress": address}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            f"{env.eigenai_grant_api_url}/message",
+            params={"address": address},
+        )
+        resp.raise_for_status()
+        grant_message: str = resp.json()["message"]
+
+    signable = encode_defunct(text=grant_message)
+    signed = Account.sign_message(signable, private_key=env.eigenai_wallet_private_key)
+    signature = "0x" + signed.signature.hex()
+
+    _grant_cache[address] = (grant_message, signature)
+    logger.info("Determinal grant credentials cached for %s", address[:10])
+    return {"grantMessage": grant_message, "grantSignature": signature, "walletAddress": address}
+
+
+def _strip_channel_tokens(content: str) -> str:
+    """Strip ``<|channel|>...<|message|>`` prefix emitted by the Determinal model."""
+    return _RE_CHANNEL_TOKENS.sub("", content).strip()
 
 
 # ── Public entry point ───────────────────────────────────────────────────────
@@ -285,12 +337,12 @@ async def run_ai_analysis(
             return
         sem_wait = time.monotonic() - sem_t0
 
-        # 6. Call EigenAI
+        # 6. Call EigenAI via Determinal grant auth
         try:
+            grant_body = await _get_grant_credentials(env)
             client = AsyncOpenAI(
-                base_url=env.eigenai_api_url,
-                api_key=env.eigenai_api_key,
-                default_headers={"x-api-key": env.eigenai_api_key},
+                base_url=f"{env.eigenai_grant_api_url}/api",
+                api_key="grant",  # dummy; real auth is via grant body
             )
             try:
                 retry_tracker: list[int] = []
@@ -303,6 +355,7 @@ async def run_ai_analysis(
                     seed=ai_seed,
                     timeout=config.pipeline.ai_analyzer_timeout,
                     retry_tracker=retry_tracker,
+                    grant_body=grant_body,
                 )
                 api_duration = time.monotonic() - api_t0
                 retry_count = len(retry_tracker)
@@ -320,6 +373,7 @@ async def run_ai_analysis(
             content = ""
         else:
             content = response.choices[0].message.content or ""
+            content = _strip_channel_tokens(content)
 
         # 8. Hash raw response for attestation
         state.ai_output_hash = hashlib.sha256(
@@ -430,6 +484,7 @@ async def _call_with_retry(
     seed: int,
     timeout: int,
     retry_tracker: list[int] | None = None,
+    grant_body: dict[str, str] | None = None,
 ) -> Any:
     """Call the AI API, retrying on transient errors with exponential backoff.
 
@@ -438,6 +493,9 @@ async def _call_with_retry(
 
     If *retry_tracker* is provided (mutable list), an entry is appended for
     each retry attempt, allowing the caller to count retries.
+
+    If *grant_body* is provided, it is passed as ``extra_body`` to inject
+    Determinal grant credentials into the request.
     """
     async with asyncio.timeout(timeout):
         for attempt in range(_MAX_RETRIES + 1):
@@ -452,6 +510,7 @@ async def _call_with_retry(
                     temperature=0.0,
                     seed=seed,
                     max_tokens=4096,
+                    extra_body=grant_body,
                 )
             except _RETRYABLE_ERRORS as exc:
                 if attempt == _MAX_RETRIES:

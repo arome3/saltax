@@ -52,7 +52,6 @@ class TestLoadValidConfig:
 
     def test_env_config_loads(self, sample_env: EnvConfig) -> None:
         """EnvConfig loads required fields from env vars."""
-        assert sample_env.eigenai_api_key == "test-key-123"
         assert sample_env.github_app_id == "999"
         assert sample_env.host == "0.0.0.0"
         assert sample_env.port == 8080
@@ -296,7 +295,6 @@ class TestEdgeCases:
         # Clear any existing SALTAX_ vars
         for key in list(monkeypatch._env_patchings if hasattr(monkeypatch, '_env_patchings') else []):
             pass
-        monkeypatch.delenv("SALTAX_EIGENAI_API_KEY", raising=False)
         monkeypatch.delenv("SALTAX_GITHUB_APP_ID", raising=False)
         monkeypatch.delenv("SALTAX_GITHUB_APP_PRIVATE_KEY", raising=False)
         monkeypatch.delenv("SALTAX_GITHUB_WEBHOOK_SECRET", raising=False)

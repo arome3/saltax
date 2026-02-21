@@ -150,7 +150,6 @@ VALID_YAML = textwrap.dedent("""\
 # Required environment variable values
 # ---------------------------------------------------------------------------
 REQUIRED_ENV_VARS: dict[str, str] = {
-    "SALTAX_EIGENAI_API_KEY": "test-key-123",
     "SALTAX_GITHUB_APP_ID": "999",
     "SALTAX_GITHUB_APP_PRIVATE_KEY": "base64-test-pem",
     "SALTAX_GITHUB_WEBHOOK_SECRET": "whsec_test",

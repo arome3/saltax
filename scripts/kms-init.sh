@@ -6,7 +6,7 @@
 # decrypted by the exact Docker image running inside the TEE.
 #
 # Usage:
-#   export SALTAX_EIGENAI_API_KEY="..."
+#   export SALTAX_EIGENAI_WALLET_PRIVATE_KEY="0x..."
 #   export SALTAX_GITHUB_APP_PRIVATE_KEY="..."
 #   export SALTAX_GITHUB_WEBHOOK_SECRET="..."
 #   export KMS_ENDPOINT="https://kms.eigencloud.xyz"
@@ -24,7 +24,7 @@ APP_NAME="saltax-sovereign"
 KMS_ENDPOINT="${KMS_ENDPOINT:-https://kms.eigencloud.xyz}"
 
 SECRETS=(
-    "SALTAX_EIGENAI_API_KEY"
+    "SALTAX_EIGENAI_WALLET_PRIVATE_KEY"
     "SALTAX_GITHUB_APP_PRIVATE_KEY"
     "SALTAX_GITHUB_WEBHOOK_SECRET"
 )

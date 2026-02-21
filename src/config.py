@@ -7,11 +7,12 @@ Tier 3 — Runtime environment: ``.env`` loaded into ``EnvConfig`` via pydantic-
 
 from __future__ import annotations
 
+import base64
 from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -116,6 +117,7 @@ class TreasuryConfig(BaseModel):
     bounty_budget: float = Field(default=0.65, ge=0.0, le=1.0)
     community_fund: float = Field(default=0.05, ge=0.0, le=1.0)
     max_single_payout_eth: float = Field(default=0.5, gt=0)
+    contract_address: str = ""
 
     @model_validator(mode="after")
     def _allocations_sum_to_one(self) -> TreasuryConfig:
@@ -150,11 +152,11 @@ class BountyConfig(BaseModel):
 class VerificationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    standard_window_hours: int = Field(default=24, gt=0)
-    self_modification_window_hours: int = Field(default=72, gt=0)
+    standard_window_hours: float = Field(default=24, gt=0)
+    self_modification_window_hours: float = Field(default=72, gt=0)
     min_challenge_stake_multiplier: float = Field(default=1.0, ge=0.0)
     check_interval_seconds: int = Field(default=60, gt=0)
-    challenge_resolution_deadline_hours: int = Field(default=168, gt=0)  # 7 days
+    challenge_resolution_deadline_hours: float = Field(default=168, gt=0)  # 7 days
 
 
 # ── Staking ──────────────────────────────────────────────────────────────────
@@ -407,13 +409,29 @@ class EnvConfig(BaseSettings):
     )
 
     # Required (no defaults — must be provided)
-    eigenai_api_key: str
     github_app_id: str
     github_app_private_key: str
     github_webhook_secret: str
     eigencloud_kms_endpoint: str
 
+    @field_validator("github_app_private_key", mode="after")
+    @classmethod
+    def _decode_pem(cls, v: str) -> str:
+        """Decode base64-encoded PEM if the value isn't already raw PEM."""
+        if v.startswith("-----BEGIN"):
+            return v
+        try:
+            return base64.b64decode(v).decode()
+        except Exception:
+            return v
+
+    # EigenAI Determinal grant auth
+    eigenai_wallet_private_key: str = ""
+    eigenai_wallet_address: str = ""
+    eigenai_grant_api_url: str = "https://determinal-api.eigenarcade.com"
+
     # Optional with sensible defaults
+    eigenai_api_key: str = "not-set"  # legacy; used by embedding endpoints only
     facilitator_url: str = "https://x402.org/facilitator"
     payment_wallet_address: str = ""
     eigenai_api_url: str = "https://eigenai.eigencloud.xyz/v1"

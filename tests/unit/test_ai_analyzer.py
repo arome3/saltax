@@ -49,6 +49,9 @@ def _make_env() -> MagicMock:
     env = MagicMock(spec=EnvConfig)
     env.eigenai_api_url = "https://eigenai.test/v1"
     env.eigenai_api_key = "test-key"
+    env.eigenai_grant_api_url = "https://determinal.test"
+    env.eigenai_wallet_private_key = "0x" + "ab" * 32
+    env.eigenai_wallet_address = "0x" + "00" * 20
     return env
 
 
@@ -126,6 +129,24 @@ def _make_retryable_error() -> APIConnectionError:
     return APIConnectionError(
         message="connection refused", request=MagicMock()
     )
+
+
+_DUMMY_GRANT_BODY = {
+    "grantMessage": "test-grant-message",
+    "grantSignature": "0x" + "ff" * 65,
+    "walletAddress": "0x" + "00" * 20,
+}
+
+
+@pytest.fixture(autouse=True)
+def _mock_grant_credentials() -> None:
+    """Patch grant credential fetching so tests don't hit the network."""
+    with patch(
+        f"{_MODULE}._get_grant_credentials",
+        new_callable=AsyncMock,
+        return_value=_DUMMY_GRANT_BODY,
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
