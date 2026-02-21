@@ -36,6 +36,10 @@ htmlcov/
 contracts/out/
 contracts/cache/
 contracts/lib/
+contracts/broadcast/
+
+# Runtime data
+data/
 
 # Internal documentation (not published)
 docs/
