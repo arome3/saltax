@@ -10,7 +10,7 @@ A self-sustaining, ownerless AI agent that autonomously maintains open-source re
 **License:** MIT
 **Platform:** [EigenCloud](https://eigencloud.xyz) (EigenCompute + EigenAI)
 
-**Scale:** 22,500 lines of Python (119 source files) | 8,500 lines of TypeScript (14-page dashboard) | Solidity contracts deployed to Base | 13-table intelligence database (schema v16) | 34 architectural docs
+**Scale:** 21-table intelligence database (schema v16) | Solidity contracts on Base | 14-page real-time dashboard | 4-stage review pipeline
 
 ---
 
@@ -105,7 +105,7 @@ SaltaX uses every major EigenCloud primitive — each is architecturally load-be
 | **Autonomous PR Review** | Multi-stage pipeline: static scan + AI analysis + test execution + weighted verdict |
 | **Deterministic AI Inference** | Seed-pinned EigenAI calls produce bit-exact reproducible outputs for independent verification |
 | **Grant-Based Wallet Auth** | No API keys — EigenAI authentication via wallet signature on a challenge message (EIP-191) |
-| **Private Intelligence DB** | TEE-sealed SQLite (13 tables, schema v16) storing vulnerability patterns, contributor profiles, embeddings, and codebase knowledge |
+| **Private Intelligence DB** | TEE-sealed SQLite (21 tables, schema v16) storing vulnerability patterns, contributor profiles, embeddings, treasury transactions, and codebase knowledge |
 | **Chained Attestation Proofs** | Domain-separated canonical JSON signed via EIP-191. Each proof links to its predecessor via `previous_attestation_id`. Captures Docker digest, TEE platform ID, I/O hashes, AI seed, system fingerprint. |
 | **Paid Audit Service** | x402-gated endpoint — external repos pay USDC for attested security analysis |
 | **Optimistic Verification** | 24h challenge window with dual-path dispute resolution (EigenVerify + MoltCourt) |
@@ -296,17 +296,19 @@ Required environment variables (prefix `SALTAX_`):
 
 | Variable | Description |
 |---|---|
-| `SALTAX_EIGENAI_API_KEY` | EigenAI API key for LLM inference |
 | `SALTAX_GITHUB_APP_ID` | GitHub App ID (string) |
-| `SALTAX_GITHUB_APP_PRIVATE_KEY` | PEM-encoded RSA private key for the GitHub App |
+| `SALTAX_GITHUB_APP_PRIVATE_KEY` | PEM-encoded RSA private key for the GitHub App (raw PEM or base64-encoded) |
 | `SALTAX_GITHUB_WEBHOOK_SECRET` | Webhook secret for HMAC signature verification |
 | `SALTAX_EIGENCLOUD_KMS_ENDPOINT` | EigenCloud KMS endpoint for secret sealing |
+| `SALTAX_EIGENAI_WALLET_PRIVATE_KEY` | Wallet private key for Determinal grant auth (KMS-sealed in production) |
+| `SALTAX_EIGENAI_WALLET_ADDRESS` | Wallet address for grant auth |
 
 Optional variables with defaults:
 
 | Variable | Default | Description |
 |---|---|---|
-| `SALTAX_EIGENAI_API_URL` | `https://eigenai.eigencloud.xyz/v1` | EigenAI endpoint |
+| `SALTAX_EIGENAI_GRANT_API_URL` | `https://determinal-api.eigenarcade.com` | Determinal grant API endpoint |
+| `SALTAX_EIGENAI_API_URL` | `https://eigenai.eigencloud.xyz/v1` | EigenAI endpoint (embeddings) |
 | `SALTAX_RPC_URL` | `https://mainnet.base.org` | Base chain RPC |
 | `SALTAX_CHAIN_ID` | `8453` | Base chain ID |
 | `SALTAX_IDENTITY_RPC_URL` | `https://ethereum-sepolia-rpc.publicnode.com` | Ethereum RPC for ERC-8004 |
@@ -354,7 +356,7 @@ SaltaX initializes through a 5-phase ordered sequence:
 
 1. **Configuration** — load `saltax.config.yaml` + `.env`, cross-validate 11 constraint rules
 2. **Cryptographic Identity** — KMS initialization, wallet generation (3-path priority: mnemonic → KMS unseal → fresh keypair), ERC-8004 identity registration
-3. **State Recovery** — open and unseal the intelligence database (schema v16, 13 tables)
+3. **State Recovery** — open and unseal the intelligence database (schema v16, 21 tables)
 4. **Build Connections** — wire the analysis pipeline, GitHub client, verification scheduler, patrol scheduler, dispute router, treasury manager
 5. **Start Services** — launch FastAPI server, verification scheduler, TypeScript proxy (with crash detection), patrol scheduler
 
@@ -429,11 +431,11 @@ saltaX/
 ├── frontend/                            # Next.js 16 dashboard (8,500 lines TypeScript)
 │   ├── src/app/                         # 14 pages (App Router)
 │   ├── src/components/
-│   │   ├── ui/                          # 23 shadcn/ui base components
+│   │   ├── ui/                          # 21 shadcn/ui base components
 │   │   ├── layout/                      # Sidebar, topbar, command palette
 │   │   └── saltax/                      # 14 domain components (pipeline stepper, attestation card, etc.)
 │   ├── src/lib/                         # API client, WebSocket, wagmi config
-│   ├── __tests__/                       # 16 component tests (Vitest)
+│   ├── __tests__/                       # 28 component + view tests (Vitest)
 │   └── e2e/                             # End-to-end tests (Playwright)
 ├── contracts/                           # Solidity smart contracts (Foundry)
 │   ├── contracts/
@@ -446,13 +448,10 @@ saltaX/
 ├── github-proxy/                        # TypeScript webhook proxy (Node 22, Octokit)
 ├── tests/                               # Python test suite
 │   ├── conftest.py                      # Shared fixtures (VALID_YAML, REQUIRED_ENV_VARS, etc.)
-│   ├── unit/                            # 45+ unit test files
+│   ├── unit/                            # 44 unit test files
 │   ├── integration/                     # End-to-end webhook flow, pipeline, attestation chain tests
 │   ├── e2e/                             # Full pipeline end-to-end tests
 │   └── fixtures/                        # Mock responses, sample diffs
-├── docs/                                # 34 architectural documents
-│   ├── 00-project-setup.md              # through 33-vector-similarity-index.md
-│   └── demo-blueprint.md               # End-to-end demo recording guide
 ├── scripts/
 │   ├── deploy.sh                        # EigenCompute deployment
 │   └── kms-init.sh                      # KMS secret sealing
@@ -562,7 +561,6 @@ On crash recovery, `recover_pending_windows()` reverts `executing` → `open` an
 - **Circuit breaker** — per-installation GitHub API circuit breaker with exponential backoff
 - **Webhook deduplication** — delivery ID tracking prevents replay of GitHub events
 - **x402 replay protection** — durable `TxHashStore` prevents double-spend of payment transactions
-- **Non-root container** — defense-in-depth alongside TEE isolation
 - **On-chain policy enforcement** — Solidity contracts mirror Python policy engine (treasury + staking)
 
 ## Sovereignty Lifecycle
@@ -614,18 +612,6 @@ cd contracts && forge test
 ```
 
 Tests use `asyncio_mode = "auto"` — no `@pytest.mark.asyncio` decorators needed. External services (GitHub API, EigenAI) are mocked via `respx` and `unittest.mock`.
-
-## Documentation
-
-SaltaX includes 34 architectural documents in `docs/` covering every subsystem:
-
-| Range | Topics |
-|---|---|
-| `00-04` | Project setup, configuration, domain models, infrastructure, bootstrap sequence |
-| `05-11` | GitHub App, ingress controller, static scanner, AI analyzer, test executor, decision engine, pipeline runner |
-| `12-20` | Intelligence DB, treasury, x402 payments, ERC-8004 identity, optimistic verification, staking, disputes, self-merge, attestation engine |
-| `21-24` | Triage: PR dedup, competitive ranking, vision alignment, advisory mode |
-| `25-33` | Smart contracts, observability, testing strategy, security hardening, autonomous patrol, UI design, issue dedup, backfill engine, vector similarity |
 
 ## Roadmap
 
