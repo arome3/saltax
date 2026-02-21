@@ -14,6 +14,21 @@ A self-sustaining, ownerless AI agent that autonomously maintains open-source re
 
 ---
 
+## The 3-Minute Demo
+
+A contributor opens a pull request against a SaltaX-managed repository. Here is what happens next — with no human involvement:
+
+1. **0s** — GitHub fires a webhook. SaltaX verifies the HMAC-SHA256 signature, deduplicates against previous deliveries, and checks for prompt injection in the PR body.
+2. **~2s** — The triage layer embeds the PR diff, runs cosine similarity against all open PRs (threshold 0.85), links it to the target issue, and scores it against the project's `vision.yaml`.
+3. **~10s** — Stage 1: Semgrep scans the diff for OWASP, supply-chain, and secret-leak patterns. A CRITICAL finding short-circuits the pipeline immediately.
+4. **~30s** — Stage 2: EigenAI analyzes code quality (1–10) and security risk (1–10). The inference call is **seed-pinned** (`int(commit_sha[:8], 16) % 2**32`) and authenticated via a wallet grant signature — no API key exists.
+5. **~5m** — Stage 3: Tests run in a sandboxed executor with a 512 MB memory cap. Exit code, coverage delta, and stdout/stderr are captured.
+6. **~5m 01s** — Stage 4: The decision engine computes a weighted score (0.25 × static + 0.25 × AI quality + 0.25 × AI security + 0.25 × tests). Score ≥ 0.75 → APPROVE. Score ≥ 0.50 → REQUEST_CHANGES. Below 0.50 → REJECT.
+7. **~5m 02s** — A **signed attestation proof** binds the Docker image digest, TEE platform ID, input hash, output hash, AI seed, and system fingerprint into a single EIP-191 signature. The proof chains to the previous attestation via `previous_attestation_id`.
+8. **+24h** — The optimistic verification window closes. No challenge was filed. SaltaX auto-merges the PR and pays the bounty from its autonomous treasury — one on-chain transaction, no human approval.
+
+The contributor earned ETH. SaltaX learned a new vulnerability pattern. The intelligence database grew. The cycle continues.
+
 ## What Is SaltaX?
 
 SaltaX is a **sovereign AI agent** — an ownerless, self-sustaining digital entity that autonomously maintains open-source software repositories. It is not a tool operated by a human. It is an independent organism that:
@@ -98,27 +113,6 @@ SaltaX uses every major EigenCloud primitive — each is architecturally load-be
 | **x402** | HTTP-native USDC payment protocol for paid audit services. Facilitator integration with replay protection via durable `TxHashStore`. |
 | **EigenVerify** | Computational dispute resolution. Replays deterministic AI inference with the same seed to verify challenged verdicts. Integrated via `EigenVerifyClient` in the dispute router. |
 
-## Core Capabilities
-
-| Capability | Description |
-|---|---|
-| **Autonomous PR Review** | Multi-stage pipeline: static scan + AI analysis + test execution + weighted verdict |
-| **Deterministic AI Inference** | Seed-pinned EigenAI calls produce bit-exact reproducible outputs for independent verification |
-| **Grant-Based Wallet Auth** | No API keys — EigenAI authentication via wallet signature on a challenge message (EIP-191) |
-| **Private Intelligence DB** | TEE-sealed SQLite (21 tables, schema v16) storing vulnerability patterns, contributor profiles, embeddings, treasury transactions, and codebase knowledge |
-| **Chained Attestation Proofs** | Domain-separated canonical JSON signed via EIP-191. Each proof links to its predecessor via `previous_attestation_id`. Captures Docker digest, TEE platform ID, I/O hashes, AI seed, system fingerprint. |
-| **Paid Audit Service** | x402-gated endpoint — external repos pay USDC for attested security analysis |
-| **Optimistic Verification** | 24h challenge window with dual-path dispute resolution (EigenVerify + MoltCourt) |
-| **Contributor Staking** | Optional stake with bonuses for verified work, slashing for overturned decisions |
-| **Self-Merge Protocol** | SaltaX can merge PRs that modify its own source code (elevated 0.90 threshold, 72h window, KMS-backed rollback, `py_compile` health check on 5 critical modules) |
-| **PR Deduplication** | Cosine-similarity detection of duplicate submissions across competing PRs (threshold 0.85) |
-| **Issue Deduplication** | Template-aware preprocessing strips boilerplate, embeds issues, flags near-duplicates at 0.90 threshold |
-| **Competitive Ranking** | Live ranking of competing PRs per issue, with labels and recommendation comments |
-| **Vision Alignment** | Score PRs against a project's `vision.yaml` for roadmap/architectural fit (up to 30% weight) |
-| **Autonomous Patrol** | Scheduled dependency vulnerability scanning (OSV.dev), codebase re-audits (Semgrep), bounty issuance for discovered vulnerabilities |
-| **Advisory Mode** | Human-in-the-loop mode: recommends actions via comments/labels without auto-merging |
-| **On-Chain Treasury** | Solidity contracts enforce fiscal policy (reserve ratio, bounty cap, max payout) mirroring Python policy engine — defense in depth |
-
 ## How the Pipeline Works
 
 When a pull request is submitted to a SaltaX-managed repository:
@@ -162,29 +156,173 @@ PR Submitted ──▶ Webhook Received ──▶ HMAC Verified ──▶ Triage
 
 If approved, the PR enters a **24-hour optimistic verification window** (72 hours for self-modifications). Anyone can challenge by staking tokens. Unchallenged PRs auto-merge and trigger bounty payout. Challenged PRs route to EigenVerify (computation disputes) or MoltCourt (subjective disputes).
 
-## Attestation Chain
+## Cryptographic Verifiability
 
-Every pipeline run — approve, reject, or review — generates a signed attestation proof:
+Most AI systems are black boxes. SaltaX is a **glass box** — every decision it makes can be independently verified by anyone, after the fact, without trusting the agent.
 
-```python
-payload = {
-    "v": "saltax-attestation-v1",       # domain separation
-    "chain_prefix": chain_prefix,        # prevents cross-chain replay
-    "attestation_id": attestation_id,
-    "docker_image_digest": digest,       # probed from /proc/self/cgroup
-    "tee_platform_id": platform_id,      # from 169.254.169.254 metadata API
-    "pipeline_input_hash": input_hash,   # SHA-256(repo + commit_sha + diff)
-    "pipeline_output_hash": output_hash, # SHA-256(findings + analysis + verdict)
-    "timestamp": iso_timestamp,
-    "ai_seed": ai_seed,
-    "ai_output_hash": ai_output_hash,
-    "ai_system_fingerprint": fingerprint,
-}
+This is possible because of two design choices that reinforce each other:
+
+**Deterministic AI inference.** Every EigenAI call is seed-pinned: `int(commit_sha[:8], 16) % 2**32`. The same commit always produces the same seed, which produces the same AI output, which produces the same verdict. This isn't approximate — it's bit-exact. A challenger can re-execute the same inference with the same seed on EigenVerify and compare the output byte-for-byte.
+
+**5-component attestation binding.** After every pipeline run, SaltaX signs an EIP-191 attestation proof that binds five components into a single cryptographic statement:
+
+| Component | What it proves |
+|---|---|
+| `docker_image_digest` | This exact code was running (probed from `/proc/self/cgroup`) |
+| `tee_platform_id` | It was running inside this specific TEE (from `169.254.169.254` metadata API) |
+| `pipeline_input_hash` | It analyzed this exact diff (SHA-256 of repo + commit SHA + diff) |
+| `pipeline_output_hash` | It produced this exact verdict (SHA-256 of findings + analysis + verdict) |
+| `ai_seed` + `ai_system_fingerprint` | The AI inference used this seed and ran on this model checkpoint |
+
+The attestation payload uses canonical JSON (sorted keys, no whitespace) with domain separation (`"v": "saltax-attestation-v1"`) and cross-chain replay prevention (`chain_prefix`). Each proof stores `previous_attestation_id`, forming a hash chain where every proof links to its predecessor.
+
+**What this means in practice:** Any third party can take a SaltaX attestation, verify the EIP-191 signature against the agent's known wallet address, and confirm that this specific Docker image, on this specific TEE, analyzed this specific diff, with this specific AI seed, and produced this specific verdict. If they doubt the verdict, they can replay the AI call with the same seed and get the same output. The agent cannot lie about what it saw, what it ran, or what it concluded.
+
+## Layered Safety Architecture
+
+SaltaX doesn't rely on a single security mechanism. It uses **five layers**, where each layer is a safety net for the one above it. A failure at any layer is caught by the layer below.
+
+```
+Layer 1: PIPELINE INTEGRITY
+│  HMAC-SHA256 webhook verification, SSRF prevention (clone URLs restricted
+│  to https://github.com), prompt injection detection, token scrubbing,
+│  input validation (branches, SHAs, diff sizes), rate limiting (60 rpm
+│  global, 10 rpm audits), per-installation circuit breaker, webhook
+│  deduplication, x402 replay protection via durable TxHashStore
+│
+▼
+Layer 2: CRYPTOGRAPHIC ATTESTATION
+│  Every verdict is signed and chained. Tampered outputs are detectable
+│  by anyone who checks the proof. See "Cryptographic Verifiability" above.
+│
+▼
+Layer 3: OPTIMISTIC VERIFICATION WINDOW
+│  No approved PR is merged immediately. A 24-hour window (72h for
+│  self-modifications) gives anyone the opportunity to challenge.
+│  Challenge requires staking ≥ the bounty value — skin in the game.
+│
+▼
+Layer 4: DISPUTE RESOLUTION
+│  Challenges route to two paths based on dispute type:
+│
+│  ┌─────────────────────┐     ┌─────────────────────┐
+│  │ EIGENVERIFY          │     │ MOLTCOURT            │
+│  │ Computation disputes │     │ Subjective disputes  │
+│  │ Re-execute with same │     │ Structured debate +  │
+│  │ seed → bit-exact     │     │ AI jury              │
+│  │ comparison           │     │                      │
+│  └─────────────────────┘     └─────────────────────┘
+│
+▼
+Layer 5: TEE GUARANTEES + ON-CHAIN ENFORCEMENT
+   Code integrity — the attested Docker image is exactly what's running.
+   Memory isolation — no external process can read TEE memory.
+   Sealed secrets — wallet keys and intelligence DB inaccessible to host.
+   Remote attestation — any party can verify the above.
+   On-chain policy — Solidity contracts mirror Python policy engine
+   (treasury + staking). The smart contract is the final guard even if
+   the Python code is compromised.
 ```
 
-Canonical JSON with sorted keys, no whitespace padding. Signed via **EIP-191** (`eth_account.Account.sign_message`). Each proof stores `previous_attestation_id` — forming a hash chain where every proof links to its predecessor.
+On crash recovery, `recover_pending_windows()` reverts `executing` → `open` and `resolving` → `challenged`. No verification window is ever silently dropped.
 
-Any third party can verify: take the proof, check the EIP-191 signature against the agent's known wallet address, and confirm that this specific Docker image, on this specific TEE, analyzed this specific diff, with this specific AI seed, and produced this specific verdict.
+## Self-Improving Intelligence
+
+SaltaX is not a static program. It is a **closed-loop organism** that gets smarter with every cycle:
+
+```
+       ┌──── EARN ◀──── ATTRACT ◀──── SPEND ◀────┐
+       │                                           │
+       ▼                                           │
+   Treasury grows ──▶ Post bounties ──▶ Contributors submit PRs
+                                              │
+                                              ▼
+                                     Pipeline reviews PR
+                                              │
+                                              ▼
+                                     LEARN: Extract vulnerability
+                                     patterns, store embeddings,
+                                     update contributor profiles,
+                                     grow codebase knowledge graph
+                                              │
+                                              └──▶ Intelligence DB grows
+                                                         │
+                                                         ▼
+                                                   Better reviews,
+                                                   smarter patrol,
+                                                   higher-value bounties
+                                                         │
+                                                         └──────────────┐
+                                                                        ▼
+                                                                   EARN ─┘
+```
+
+**The intelligence database** (21 tables, schema v16) is TEE-sealed and hardware-encrypted. It stores vulnerability patterns, PR embeddings, issue embeddings, contributor profiles, attestation history, bounty records, codebase knowledge graphs, and vision alignment data. No human — including the deployer — can read it.
+
+**Patrol is the proactive arm.** SaltaX doesn't wait for PRs. On a configurable schedule, it scans managed repositories for dependency vulnerabilities (via OSV.dev), re-audits codebases with Semgrep, and automatically issues severity-calibrated bounties for discovered vulnerabilities. Every patrol cycle adds to the intelligence database, making the next cycle more informed.
+
+**Self-evolution** closes the loop. SaltaX can merge PRs that modify its own source code — through the same pipeline, with an elevated 0.90 approval threshold, a 72-hour verification window, `py_compile` health checks on 5 critical modules, and KMS-backed rollback if the health check fails. The organism upgrades itself.
+
+## Economic Design
+
+SaltaX's economic model is designed around three principles: **asymmetric staking** (challengers risk real capital, preventing frivolous disputes), **severity-calibrated patrol bounties** (critical vulnerabilities pay more, attracting effort where it matters most), and **dual Python + Solidity enforcement** (fiscal policy is enforced in both the agent's runtime and on-chain contracts — even if the Python code is compromised, the Solidity contracts hold the line).
+
+### Revenue Streams
+
+| Source | Mechanism |
+|---|---|
+| **Sponsorships** | GitHub Sponsors, direct ETH/USDC transfers to the treasury wallet |
+| **x402 Audit Fees** | External clients pay USDC for attested security analysis |
+| **Stake Penalties** | Slashed stakes from contributors whose PRs are overturned on challenge |
+
+### Treasury Allocation
+
+| Category | % | Description |
+|---|---|---|
+| Bounty Payouts | 65% | Direct payment to verified contributors |
+| Reserve Fund | 20% | Minimum balance for operational continuity |
+| EigenCompute Fees | 10% | Infrastructure costs (TEE runtime, AI inference) |
+| Community Grants | 5% | Documentation bounties, ecosystem development |
+
+Enforced in **both** Python (`TreasuryPolicy`) and Solidity (`SaltaXTreasury.sol`) — the smart contract is the final guard even if the Python code is compromised.
+
+### Bounty Tiers
+
+| Label | Payout (ETH) |
+|---|---|
+| `bounty-xs` | 0.01 |
+| `bounty-sm` | 0.05 |
+| `bounty-md` | 0.10 |
+| `bounty-lg` | 0.25 |
+| `bounty-xl` | 0.50 |
+
+Patrol-discovered vulnerabilities are automatically mapped to bounty tiers by severity: CRITICAL → `bounty-xl`, HIGH → `bounty-lg`, MEDIUM → `bounty-md`, LOW → `bounty-sm`. This creates a market signal — the agent spends more to fix what matters more.
+
+### Staking Economics
+
+Integer-only basis-point arithmetic (no floating point):
+
+| Scenario | Contributor Outcome |
+|---|---|
+| PR approved, no challenge | Bounty + stake returned + 10% bonus |
+| PR approved, challenged, upheld | Bounty + stake returned + 20% bonus |
+| PR approved, challenged, overturned | Stake slashed 50%, no bounty |
+| PR rejected by pipeline | Stake returned in full (no penalty) |
+
+The 20% upheld bonus (vs. 10% unchallenged) deliberately rewards contributors who survive scrutiny. The 50% slash on overturned decisions makes low-quality submissions expensive. The asymmetry is intentional — it selects for confidence and quality.
+
+## Smart Contracts
+
+Solidity contracts deployed to **Base** enforce fiscal policy on-chain, mirroring the Python policy engine for defense in depth:
+
+**`SaltaXTreasury.sol`** — On-chain treasury with three policy checks on every payout:
+1. `amount <= maxSinglePayoutWei`
+2. `(balance - amount) >= (balance * reserveRatioBps / 10000)`
+3. `amount <= (balance * bountyBudgetBps / 10000)`
+
+**`SaltaXStaking.sol`** — Full staking lifecycle: `depositStake`, `releaseStake`, `slashStake`, `refundStake`. `ReentrancyGuard` on all value transfers. `Ownable2Step` for safe ownership. `Pausable` for emergency circuit breaker.
+
+Built with Foundry. Tests in `contracts/test/`.
 
 ## Mission Control Dashboard
 
@@ -209,18 +347,26 @@ SaltaX includes a full **Next.js dashboard** (8,500 lines of TypeScript) providi
 
 Built with shadcn/ui, Tailwind CSS, and wagmi for wallet integration. Dark theme optimized for screen recording. `Cmd+K` command palette for navigation. Connects to the Python backend via REST API and WebSocket (live log streaming).
 
-## Smart Contracts
+## Core Capabilities
 
-Solidity contracts deployed to **Base** enforce fiscal policy on-chain, mirroring the Python policy engine for defense in depth:
-
-**`SaltaXTreasury.sol`** — On-chain treasury with three policy checks on every payout:
-1. `amount <= maxSinglePayoutWei`
-2. `(balance - amount) >= (balance * reserveRatioBps / 10000)`
-3. `amount <= (balance * bountyBudgetBps / 10000)`
-
-**`SaltaXStaking.sol`** — Full staking lifecycle: `depositStake`, `releaseStake`, `slashStake`, `refundStake`. `ReentrancyGuard` on all value transfers. `Ownable2Step` for safe ownership. `Pausable` for emergency circuit breaker.
-
-Built with Foundry. Tests in `contracts/test/`.
+| Capability | Description |
+|---|---|
+| **Autonomous PR Review** | Multi-stage pipeline: static scan + AI analysis + test execution + weighted verdict |
+| **Deterministic AI Inference** | Seed-pinned EigenAI calls produce bit-exact reproducible outputs for independent verification |
+| **Grant-Based Wallet Auth** | No API keys — EigenAI authentication via wallet signature on a challenge message (EIP-191) |
+| **Private Intelligence DB** | TEE-sealed SQLite (21 tables, schema v16) storing vulnerability patterns, contributor profiles, embeddings, treasury transactions, and codebase knowledge |
+| **Chained Attestation Proofs** | Domain-separated canonical JSON signed via EIP-191. Each proof links to its predecessor via `previous_attestation_id`. Captures Docker digest, TEE platform ID, I/O hashes, AI seed, system fingerprint. |
+| **Paid Audit Service** | x402-gated endpoint — external repos pay USDC for attested security analysis |
+| **Optimistic Verification** | 24h challenge window with dual-path dispute resolution (EigenVerify + MoltCourt) |
+| **Contributor Staking** | Optional stake with bonuses for verified work, slashing for overturned decisions |
+| **Self-Merge Protocol** | SaltaX can merge PRs that modify its own source code (elevated 0.90 threshold, 72h window, KMS-backed rollback, `py_compile` health check on 5 critical modules) |
+| **PR Deduplication** | Cosine-similarity detection of duplicate submissions across competing PRs (threshold 0.85) |
+| **Issue Deduplication** | Template-aware preprocessing strips boilerplate, embeds issues, flags near-duplicates at 0.90 threshold |
+| **Competitive Ranking** | Live ranking of competing PRs per issue, with labels and recommendation comments |
+| **Vision Alignment** | Score PRs against a project's `vision.yaml` for roadmap/architectural fit (up to 30% weight) |
+| **Autonomous Patrol** | Scheduled dependency vulnerability scanning (OSV.dev), codebase re-audits (Semgrep), bounty issuance for discovered vulnerabilities |
+| **Advisory Mode** | Human-in-the-loop mode: recommends actions via comments/labels without auto-merging |
+| **On-Chain Treasury** | Solidity contracts enforce fiscal policy (reserve ratio, bounty cap, max payout) mirroring Python policy engine — defense in depth |
 
 ## Tech Stack
 
@@ -461,119 +607,6 @@ saltaX/
 ├── docker-compose.yml                   # Development compose file
 └── .env.example                         # Environment variable template
 ```
-
-## Economic Model
-
-### Revenue Streams
-
-| Source | Mechanism |
-|---|---|
-| **Sponsorships** | GitHub Sponsors, direct ETH/USDC transfers to the treasury wallet |
-| **x402 Audit Fees** | External clients pay USDC for attested security analysis |
-| **Stake Penalties** | Slashed stakes from contributors whose PRs are overturned on challenge |
-
-### Treasury Allocation
-
-| Category | % | Description |
-|---|---|---|
-| Bounty Payouts | 65% | Direct payment to verified contributors |
-| Reserve Fund | 20% | Minimum balance for operational continuity |
-| EigenCompute Fees | 10% | Infrastructure costs (TEE runtime, AI inference) |
-| Community Grants | 5% | Documentation bounties, ecosystem development |
-
-Enforced in **both** Python (`TreasuryPolicy`) and Solidity (`SaltaXTreasury.sol`) — the smart contract is the final guard even if the Python code is compromised.
-
-### Bounty Tiers
-
-| Label | Payout (ETH) |
-|---|---|
-| `bounty-xs` | 0.01 |
-| `bounty-sm` | 0.05 |
-| `bounty-md` | 0.10 |
-| `bounty-lg` | 0.25 |
-| `bounty-xl` | 0.50 |
-
-### Staking Economics
-
-Integer-only basis-point arithmetic (no floating point):
-
-| Scenario | Contributor Outcome |
-|---|---|
-| PR approved, no challenge | Bounty + stake returned + 10% bonus |
-| PR approved, challenged, upheld | Bounty + stake returned + 20% bonus |
-| PR approved, challenged, overturned | Stake slashed 50%, no bounty |
-| PR rejected by pipeline | Stake returned in full (no penalty) |
-
-## Dispute Resolution
-
-SaltaX uses **optimistic verification** — decisions are assumed valid unless challenged within a time window.
-
-```
-SaltaX approves PR
-        │
-        ▼
-  OPTIMISTIC WINDOW
-  (24h standard / 72h self-mod)
-        │
-   ┌────┴─────┐
-   │          │
-No challenge  Challenge filed (must stake >= bounty value)
-   │          │
-   ▼          ▼
-AUTO-EXECUTE  CLASSIFY DISPUTE
-(merge+pay)        │
-              ┌────┴────────┐
-              │             │
-         Computation    Subjective
-         dispute        dispute
-              │             │
-              ▼             ▼
-        EIGENVERIFY     MOLTCOURT
-       (re-execute +   (structured
-        same seed =     debate +
-        bit-exact       AI jury)
-        output)
-```
-
-**EigenVerify** handles objective, computation-based disputes. Because SaltaX uses seed-pinned deterministic inference, the AI analysis stage produces bit-exact identical output on re-execution with the same seed.
-
-**MoltCourt** handles subjective disputes (e.g., "the code quality score should have been higher") through structured multi-round debate with an AI jury.
-
-On crash recovery, `recover_pending_windows()` reverts `executing` → `open` and `resolving` → `challenged`. No window is ever silently dropped.
-
-## Security Model
-
-### TEE Guarantees
-
-- **Code integrity** — the attested Docker image is exactly what's running
-- **Memory isolation** — no external process can read TEE memory
-- **Sealed secrets** — wallet keys and intelligence DB are inaccessible to the host
-- **Remote attestation** — any party can verify the above
-
-### Defense-in-Depth
-
-- **HMAC-SHA256** verification on all GitHub webhooks
-- **SSRF prevention** — clone URLs restricted to `https://github.com` only
-- **Prompt injection detection** — regex-based scanning with XML tag neutralization and reinforcement prefix injection
-- **Token scrubbing** — GitHub PATs and installation tokens redacted from all logs
-- **Input validation** — branch names, commit SHAs, and diff sizes validated before processing
-- **Rate limiting** — per-endpoint rate limits (60 rpm global, 10 rpm for audits)
-- **Circuit breaker** — per-installation GitHub API circuit breaker with exponential backoff
-- **Webhook deduplication** — delivery ID tracking prevents replay of GitHub events
-- **x402 replay protection** — durable `TxHashStore` prevents double-spend of payment transactions
-- **On-chain policy enforcement** — Solidity contracts mirror Python policy engine (treasury + staking)
-
-## Sovereignty Lifecycle
-
-| Property | Implementation |
-|---|---|
-| **Owns assets** | Autonomous wallet (ETH/USDC) + TEE-sealed intelligence DB + on-chain treasury contract |
-| **Earns income** | Sponsorships + x402 audit fees + stake penalties |
-| **Spends** | Bounty payouts (EIP-1559 on Base) + EigenCompute fees + community grants |
-| **Upgrades itself** | Self-merge protocol: PRs targeting SaltaX's own source code (0.90 threshold, 72h window, `py_compile` health check, KMS-backed rollback) |
-| **Enforces property rights** | TEE seals the intelligence DB; wallet key exists only in TEE memory; Solidity contracts enforce fiscal policy |
-| **Patrols proactively** | Scheduled dependency audits (OSV.dev), codebase re-scans (Semgrep), automatic bounty issuance |
-| **Operates autonomously** | No human in the loop; disputes are the only external touchpoint |
 
 ## Concurrency Model
 
