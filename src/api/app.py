@@ -16,13 +16,19 @@ from src.api.routes.attestation import router as attestation_router
 from src.api.routes.audit import router as audit_router
 from src.api.routes.bounties import router as bounties_router
 from src.api.routes.challenge import router as challenge_router
+from src.api.routes.codebase import router as codebase_router
+from src.api.routes.contributors import router as contributors_router
 from src.api.routes.dispute import router as dispute_router
 from src.api.routes.health import router as health_router
 from src.api.routes.identity import router as identity_router
 from src.api.routes.intelligence import router as intelligence_router
+from src.api.routes.patrol import router as patrol_router
+from src.api.routes.pipeline import router as pipeline_router
 from src.api.routes.status import router as status_router
+from src.api.routes.treasury import router as treasury_router
 from src.api.routes.vision import router as vision_router
 from src.api.routes.webhook import router as webhook_router
+from src.api.routes.ws_logs import router as ws_logs_router
 from src.security.errors import DegradedError, SaltaXError, SecurityError
 
 if TYPE_CHECKING:
@@ -126,6 +132,12 @@ def create_app(
     app.include_router(health_router, prefix="/api/v1")
     app.include_router(intelligence_router, prefix="/api/v1")
     app.include_router(vision_router, prefix="/api/v1")
+    app.include_router(pipeline_router, prefix="/api/v1")
+    app.include_router(contributors_router, prefix="/api/v1")
+    app.include_router(patrol_router, prefix="/api/v1")
+    app.include_router(codebase_router, prefix="/api/v1")
+    app.include_router(treasury_router, prefix="/api/v1")
+    app.include_router(ws_logs_router)
 
     # ── Liveness probe ───────────────────────────────────────────────
     @app.get("/healthz")

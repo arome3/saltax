@@ -1,4 +1,4 @@
-"""Vision document ingestion endpoint."""
+"""Vision document list and ingestion endpoints."""
 
 from __future__ import annotations
 
@@ -28,6 +28,15 @@ class VisionRequestBody(BaseModel):
     content: str
     title: str | None = None
     doc_type: str = "vision"
+
+
+@router.get("/vision")
+async def list_vision_documents(
+    intel_db: Any = Depends(get_intel_db),  # noqa: B008
+) -> dict[str, Any]:
+    """Return all vision documents (without content/embedding)."""
+    items = await intel_db.list_all_vision_documents()
+    return {"items": items, "count": len(items)}
 
 
 @router.post("/vision")

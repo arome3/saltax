@@ -2765,3 +2765,344 @@ class IntelligenceDB:
                 (bounty_issue_number, repo, rule_id, file_path, line_start),
             )
             await db.commit()
+
+    # ── Dashboard query methods ───────────────────────────────────────
+
+    async def list_pipeline_history(
+        self,
+        repo: str | None = None,
+        verdict: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return pipeline history records with parsed verdict JSON."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if repo:
+            conditions.append("repo = ?")
+            params.append(repo)
+        if verdict:
+            conditions.append("verdict LIKE ?")
+            params.append(f'%"decision": "{verdict}"%')
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            f"SELECT * FROM pipeline_history{where} "  # noqa: S608
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        results = []
+        for row in rows:
+            record = dict(zip(cols, row, strict=False))
+            raw = record.get("verdict", "{}")
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            record["verdict_parsed"] = parsed
+            record["verdict"] = parsed.get("decision", "UNKNOWN")
+            record["score_breakdown"] = parsed.get("score_breakdown", {})
+            record["is_self_modification"] = parsed.get("is_self_modification", False)
+            record["threshold_used"] = parsed.get("threshold_used")
+            results.append(record)
+        return results
+
+    async def get_pipeline_record(self, record_id: str) -> dict[str, Any] | None:
+        """Return a single pipeline history record with parsed verdict JSON."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM pipeline_history WHERE id = ?", (record_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            cols = [d[0] for d in cursor.description]
+        record = dict(zip(cols, row, strict=False))
+        raw = record.get("verdict", "{}")
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            parsed = {}
+        record["verdict_parsed"] = parsed
+        record["verdict"] = parsed.get("decision", "UNKNOWN")
+        record["score_breakdown"] = parsed.get("score_breakdown", {})
+        record["is_self_modification"] = parsed.get("is_self_modification", False)
+        record["threshold_used"] = parsed.get("threshold_used")
+        record["attestation_id"] = parsed.get("attestation_id")
+        return record
+
+    async def count_pipeline_history(
+        self,
+        repo: str | None = None,
+        verdict: str | None = None,
+    ) -> int:
+        """Count pipeline history records matching optional filters."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if repo:
+            conditions.append("repo = ?")
+            params.append(repo)
+        if verdict:
+            conditions.append("verdict LIKE ?")
+            params.append(f'%"decision": "{verdict}"%')
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT COUNT(*) FROM pipeline_history{where}"  # noqa: S608
+        async with db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def list_contributors(
+        self,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return contributor profiles ordered by approved submissions."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM contributor_profiles "
+            "ORDER BY approved_submissions DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def get_contributor(self, contributor_id: str) -> dict[str, Any] | None:
+        """Return a single contributor profile by ID."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM contributor_profiles WHERE id = ?",
+            (contributor_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            cols = [d[0] for d in cursor.description]
+        return dict(zip(cols, row, strict=False))
+
+    async def count_contributors(self) -> int:
+        """Count total contributor profiles."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT COUNT(*) FROM contributor_profiles",
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def list_patrol_history(
+        self,
+        repo: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return patrol history records ordered by timestamp descending."""
+        db = self._require_db()
+        params: list[Any] = []
+        where = ""
+        if repo:
+            where = " WHERE repo = ?"
+            params.append(repo)
+        sql = (
+            f"SELECT * FROM patrol_history{where} "  # noqa: S608
+            "ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def list_known_vulnerabilities(
+        self,
+        repo: str | None = None,
+        status: str | None = None,
+        severity: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return known vulnerabilities with optional filters."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if repo:
+            conditions.append("repo = ?")
+            params.append(repo)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        if severity:
+            conditions.append("severity = ?")
+            params.append(severity)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            f"SELECT * FROM known_vulnerabilities{where} "  # noqa: S608
+            "ORDER BY first_detected DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def list_patrol_patches(
+        self,
+        repo: str | None = None,
+        status: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return patrol patches with optional filters."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if repo:
+            conditions.append("repo = ?")
+            params.append(repo)
+        if status:
+            conditions.append("status = ?")
+            params.append(status)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            f"SELECT * FROM patrol_patches{where} "  # noqa: S608
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def list_codebase_knowledge(self, repo: str) -> list[dict[str, Any]]:
+        """Return all codebase knowledge entries for a repository."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM codebase_knowledge WHERE repo = ? ORDER BY file_path",
+            (repo,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def search_attestations(
+        self,
+        query: str | None = None,
+        action_type: str | None = None,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Search attestation records by ID or PR ID prefix."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if query:
+            conditions.append(
+                "(attestation_id LIKE ? OR pr_id LIKE ?)",
+            )
+            like_param = f"%{query}%"
+            params.extend([like_param, like_param])
+        if action_type:
+            conditions.append("attestation_id LIKE ?")
+            params.append(f"{action_type}-%")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = (
+            f"SELECT * FROM attestation_store{where} "  # noqa: S608
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        params.extend([limit, offset])
+        async with db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def count_attestations(
+        self,
+        query: str | None = None,
+        action_type: str | None = None,
+    ) -> int:
+        """Count attestation records matching optional filters."""
+        db = self._require_db()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if query:
+            conditions.append("(attestation_id LIKE ? OR pr_id LIKE ?)")
+            like_param = f"%{query}%"
+            params.extend([like_param, like_param])
+        if action_type:
+            conditions.append("attestation_id LIKE ?")
+            params.append(f"{action_type}-%")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        sql = f"SELECT COUNT(*) FROM attestation_store{where}"  # noqa: S608
+        async with db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def list_all_vision_documents(self) -> list[dict[str, Any]]:
+        """Return all vision documents without content/embedding for listing."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT id, repo, doc_type, updated_at FROM vision_documents "
+            "ORDER BY updated_at DESC",
+        ) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def list_transactions(
+        self,
+        limit: int = 25,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return treasury transactions ordered by timestamp descending."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT * FROM treasury_transactions "
+            "ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            cols = [d[0] for d in cursor.description]
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    async def count_transactions(self) -> int:
+        """Count total treasury transactions."""
+        db = self._require_db()
+        async with db.execute(
+            "SELECT COUNT(*) FROM treasury_transactions",
+        ) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def record_transaction(
+        self,
+        *,
+        tx_id: str,
+        tx_hash: str,
+        tx_type: str,
+        amount_wei: int,
+        currency: str = "ETH",
+        counterparty: str = "",
+        pr_id: str | None = None,
+        audit_id: str | None = None,
+        bounty_id: str | None = None,
+        attestation_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        """Persist a treasury transaction to the database."""
+        db = self._require_db()
+        ts = timestamp or datetime.now(UTC).isoformat()
+        async with self._write_lock:
+            await db.execute(
+                "INSERT INTO treasury_transactions "
+                "(id, tx_hash, tx_type, amount_wei, currency, counterparty, "
+                "pr_id, audit_id, bounty_id, attestation_id, timestamp) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    tx_id, tx_hash, tx_type, amount_wei, currency, counterparty,
+                    pr_id, audit_id, bounty_id, attestation_id, ts,
+                ),
+            )
+            await db.commit()

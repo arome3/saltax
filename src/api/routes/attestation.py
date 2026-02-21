@@ -1,12 +1,12 @@
-"""TEE attestation proof retrieval endpoint."""
+"""TEE attestation proof retrieval and search endpoints."""
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from src.api.deps import get_intel_db
@@ -73,6 +73,34 @@ def _determine_signature_status(record: dict[str, object]) -> str:
     if verify_signature(proof, signer):
         return "valid"
     return "invalid"
+
+
+@router.get("/attestation", response_model=None)
+async def search_attestations(
+    q: str | None = Query(None, description="Search by attestation ID or PR ID"),
+    action_type: str | None = Query(None, description="Filter by action type prefix"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(25, ge=1, le=100, description="Results per page"),
+    intel_db: IntelligenceDB = Depends(get_intel_db),  # noqa: B008
+) -> dict[str, Any]:
+    """Search attestation records."""
+    try:
+        offset = (page - 1) * limit
+        items = await intel_db.search_attestations(
+            query=q, action_type=action_type, limit=limit, offset=offset,
+        )
+        count = await intel_db.count_attestations(query=q, action_type=action_type)
+    except RuntimeError:
+        return JSONResponse(
+            status_code=503,
+            content={"status_code": 503, "error": "Service Unavailable",
+                     "detail": "Intelligence database is unavailable"},
+        )
+    # Convert values to strings for JSON serialization safety
+    serialized = []
+    for item in items:
+        serialized.append({k: str(v) if v is not None else None for k, v in item.items()})
+    return {"items": serialized, "count": count, "page": page, "limit": limit}
 
 
 @router.get("/attestation/{action_id}", response_model=None)
