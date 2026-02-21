@@ -37,7 +37,7 @@ DB_PATH = Path("/tmp/saltax_intel.db")
 
 _FP_THRESHOLD = 0.8
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 15
+_CURRENT_SCHEMA_VERSION = 16
 _MAX_RETRIES = 3
 _RETRY_BASE_MS = 100
 _MAX_LIKE_TOKENS = 20
@@ -347,6 +347,23 @@ CREATE TABLE IF NOT EXISTS patrol_patches (
 );
 CREATE INDEX IF NOT EXISTS idx_patrol_patches_repo ON patrol_patches(repo);
 CREATE INDEX IF NOT EXISTS idx_patrol_patches_status ON patrol_patches(status);
+
+CREATE TABLE IF NOT EXISTS treasury_transactions (
+    id              TEXT PRIMARY KEY,
+    tx_hash         TEXT,
+    tx_type         TEXT NOT NULL,
+    amount_wei      INTEGER NOT NULL,
+    currency        TEXT NOT NULL DEFAULT 'ETH',
+    counterparty    TEXT NOT NULL DEFAULT '',
+    pr_id           TEXT,
+    audit_id        TEXT,
+    bounty_id       TEXT,
+    attestation_id  TEXT,
+    timestamp       TEXT NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tt_timestamp ON treasury_transactions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_tt_tx_type ON treasury_transactions(tx_type);
 """
 
 
@@ -781,11 +798,33 @@ class IntelligenceDB:
                             "ADD COLUMN source TEXT DEFAULT 'pipeline'",
                         )
                     await db.commit()
-                await db.execute(
-                    "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
-                    (_CURRENT_SCHEMA_VERSION, now),
+            if current < 16:
+                await db.executescript(
+                    "CREATE TABLE IF NOT EXISTS treasury_transactions ("
+                    "    id              TEXT PRIMARY KEY,"
+                    "    tx_hash         TEXT,"
+                    "    tx_type         TEXT NOT NULL,"
+                    "    amount_wei      INTEGER NOT NULL,"
+                    "    currency        TEXT NOT NULL DEFAULT 'ETH',"
+                    "    counterparty    TEXT NOT NULL DEFAULT '',"
+                    "    pr_id           TEXT,"
+                    "    audit_id        TEXT,"
+                    "    bounty_id       TEXT,"
+                    "    attestation_id  TEXT,"
+                    "    timestamp       TEXT NOT NULL,"
+                    "    created_at      TEXT NOT NULL DEFAULT (datetime('now'))"
+                    ");"
+                    "CREATE INDEX IF NOT EXISTS idx_tt_timestamp "
+                    "ON treasury_transactions(timestamp);"
+                    "CREATE INDEX IF NOT EXISTS idx_tt_tx_type "
+                    "ON treasury_transactions(tx_type);"
                 )
                 await db.commit()
+            await db.execute(
+                "UPDATE schema_version SET version = ?, updated_at = ? WHERE id = 1",
+                (_CURRENT_SCHEMA_VERSION, now),
+            )
+            await db.commit()
 
     async def seal(self, kms: KMSSealManager) -> None:
         """Seal the database for graceful shutdown.

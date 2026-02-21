@@ -507,7 +507,10 @@ def _make_test_app(
 
     app.state.config = config
     app.state.pipeline = pipeline_mock or AsyncMock()
-    app.state.treasury_mgr = treasury_mock or MagicMock()
+    if treasury_mock is None:
+        treasury_mock = MagicMock()
+        treasury_mock.record_incoming = AsyncMock()
+    app.state.treasury_mgr = treasury_mock
     app.state.payment_verifier = verifier_mock or MagicMock()
 
     # Default tx_store mock: never seen any tx_hash
@@ -779,6 +782,7 @@ class TestAuditRouteX402:
         """Valid payment records revenue with atomic amount and USDC currency."""
         mock_v = _mock_verifier(valid=True, amount_atomic=10_000_000)
         treasury_mock = MagicMock()
+        treasury_mock.record_incoming = AsyncMock()
         app = _make_test_app(verifier_mock=mock_v, treasury_mock=treasury_mock)
         unique_body = {
             "repository_url": "https://github.com/owner/revenue-repo",

@@ -108,8 +108,9 @@ def _make_sample_bounty_config() -> BountyConfig:
 
 
 class TestWalletInitialization:
-    async def test_first_boot_generates_keypair(self) -> None:
+    async def test_first_boot_generates_keypair(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """First boot (unseal fails) generates a new account and seals it."""
+        monkeypatch.delenv("MNEMONIC", raising=False)
         kms = _make_mock_kms(has_key=False)
         wallet = WalletManager(kms=kms)
         await wallet.initialize()
@@ -118,6 +119,40 @@ class TestWalletInitialization:
         assert wallet.address.startswith("0x")
         assert len(wallet.address) == 42
         kms.seal.assert_awaited_once()
+
+    async def test_mnemonic_env_derives_deterministic_wallet(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When MNEMONIC env var is set, wallet is derived from it (stable across restarts)."""
+        test_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        monkeypatch.setenv("MNEMONIC", test_mnemonic)
+
+        kms = _make_mock_kms(has_key=False)
+        wallet = WalletManager(kms=kms)
+        await wallet.initialize()
+
+        assert wallet.address is not None
+        # KMS unseal/seal should NOT be called — mnemonic takes priority
+        kms.unseal.assert_not_awaited()
+        kms.seal.assert_not_awaited()
+
+        # Same mnemonic always produces the same address
+        kms2 = _make_mock_kms(has_key=False)
+        wallet2 = WalletManager(kms=kms2)
+        await wallet2.initialize()
+        assert wallet2.address == wallet.address
+
+    async def test_empty_mnemonic_falls_through(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Empty MNEMONIC env var falls through to KMS path."""
+        monkeypatch.setenv("MNEMONIC", "  ")
+        kms = _make_mock_kms(has_key=False)
+        wallet = WalletManager(kms=kms)
+        await wallet.initialize()
+
+        # Should have fallen through to KMS → unseal was attempted
+        kms.unseal.assert_awaited_once()
 
     async def test_recovery_from_kms(self) -> None:
         """When KMS has a sealed key, wallet recovers the same address."""
@@ -632,9 +667,9 @@ class TestTreasuryManager:
         """Unknown bounty label returns None."""
         assert manager.get_bounty_amount_wei("nonexistent") is None
 
-    def test_record_incoming_revenue(self, manager: TreasuryManager) -> None:
+    async def test_record_incoming_revenue(self, manager: TreasuryManager) -> None:
         """record_incoming updates revenue counter."""
-        record = manager.record_incoming(
+        record = await manager.record_incoming(
             tx_type="sponsorship",
             amount_wei=_1_ETH_WEI,
             counterparty="0x" + "dd" * 20,

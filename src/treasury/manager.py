@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -169,7 +170,7 @@ class TreasuryManager:
                         request.bounty_id,
                     )
 
-            return TransactionRecord(
+            record = TransactionRecord(
                 tx_hash=tx_hash,
                 tx_type="payout",
                 amount_wei=total_wei,
@@ -178,9 +179,24 @@ class TreasuryManager:
                 bounty_id=request.bounty_id,
             )
 
+            try:
+                await self._intel_db.record_transaction(
+                    tx_id=str(uuid.uuid4()),
+                    tx_hash=tx_hash,
+                    tx_type="payout",
+                    amount_wei=total_wei,
+                    counterparty=request.recipient,
+                    bounty_id=request.bounty_id,
+                    timestamp=now,
+                )
+            except Exception:
+                logger.exception("Failed to persist payout transaction")
+
+            return record
+
     # ── Incoming transactions ─────────────────────────────────────────────
 
-    def record_incoming(
+    async def record_incoming(
         self,
         *,
         tx_type: str,
@@ -192,16 +208,16 @@ class TreasuryManager:
     ) -> TransactionRecord:
         """Record an incoming transaction (sponsorship, audit fee, penalty).
 
-        Updates the per-currency revenue counter.  ``amount_wei`` stores
-        the value in the smallest unit of the given ``currency``
-        (Wei for ETH, atomic units for USDC).
+        Updates the per-currency revenue counter and persists to the DB.
+        ``amount_wei`` stores the value in the smallest unit of the given
+        ``currency`` (Wei for ETH, atomic units for USDC).
         """
         self._revenue_by_currency[currency] = (
             self._revenue_by_currency.get(currency, 0) + amount_wei
         )
         self._tx_count += 1
         now = datetime.now(UTC).isoformat()
-        return TransactionRecord(
+        record = TransactionRecord(
             tx_hash=tx_hash or "",
             tx_type=tx_type,
             amount_wei=amount_wei,
@@ -210,6 +226,22 @@ class TreasuryManager:
             currency=currency,
             audit_id=audit_id or "",
         )
+
+        try:
+            await self._intel_db.record_transaction(
+                tx_id=str(uuid.uuid4()),
+                tx_hash=tx_hash or "",
+                tx_type=tx_type,
+                amount_wei=amount_wei,
+                currency=currency,
+                counterparty=counterparty,
+                audit_id=audit_id,
+                timestamp=now,
+            )
+        except Exception:
+            logger.exception("Failed to persist incoming transaction")
+
+        return record
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 

@@ -280,7 +280,7 @@ async def request_audit(
         )
 
     # ── 10. Record revenue ───────────────────────────────────────────
-    treasury_mgr.record_incoming(
+    await treasury_mgr.record_incoming(
         tx_type="audit_fee_usdc",
         amount_wei=payment.amount_atomic,
         counterparty=payment.payer_address,

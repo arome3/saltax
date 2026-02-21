@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import statistics
 from typing import TYPE_CHECKING
 
@@ -87,22 +88,36 @@ class WalletManager:
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
-        """Derive or recover the wallet key from KMS.
+        """Derive or recover the wallet key.
 
-        Four failure paths:
+        Priority order:
 
-        1. KMS unseal succeeds → recovery from sealed key
-        2. KMS unseal fails → first boot, generate new keypair
-           a. KMS seal succeeds → normal operation
-           b. KMS seal fails → ``_seal_failed=True``, continue in-memory
-        3. Unsealed bytes are corrupted → ``RuntimeError`` (do NOT generate
-           new key — that would create a second wallet with different address)
+        1. ``MNEMONIC`` env var (injected by ecloud KMS) → deterministic wallet
+           that survives upgrades/restarts.  Uses BIP-44 path m/44'/60'/0'/0/0.
+        2. KMS unseal succeeds → recovery from sealed key.
+        3. KMS unseal fails → first boot, generate new keypair.
+           a. KMS seal succeeds → normal operation.
+           b. KMS seal fails → ``_seal_failed=True``, continue in-memory.
+        4. Unsealed bytes are corrupted → ``RuntimeError`` (do NOT generate
+           new key — that would create a second wallet with different address).
 
         Raises ``RuntimeError`` if called more than once (leaks the old provider).
         """
         if self._account is not None:
             raise RuntimeError("WalletManager already initialized — cannot call initialize() twice")
-        # Try recovery first
+
+        # Path 1: Derive from TEE-injected mnemonic (stable across upgrades)
+        mnemonic = os.environ.get("MNEMONIC")
+        if mnemonic and mnemonic.strip():
+            Account.enable_unaudited_hdwallet_features()
+            self._account = Account.from_mnemonic(mnemonic.strip())
+            logger.info(
+                "Wallet derived from TEE mnemonic: %s", self._account.address
+            )
+            self._w3 = AsyncWeb3(AsyncHTTPProvider(self._rpc_url))
+            return
+
+        # Path 2: Try KMS recovery
         try:
             sealed_key = await self._kms.unseal(_KMS_KEY)
         except Exception:
@@ -119,7 +134,7 @@ class WalletManager:
                 ) from None
             logger.info("Recovered wallet from KMS: %s", self._account.address)
         else:
-            # First boot — generate new keypair
+            # Path 3: First boot — generate new keypair
             self._account = Account.create()
             logger.info("Generated new wallet: %s", self._account.address)
             try:

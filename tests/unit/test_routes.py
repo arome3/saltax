@@ -89,6 +89,7 @@ def _make_app() -> FastAPI:
             bounty_wei=0,
         )
     )
+    treasury_mgr.record_incoming = AsyncMock()
     app.state.treasury_mgr = treasury_mgr
 
     # x402 payment verifier — returns valid by default for backward compat
