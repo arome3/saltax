@@ -498,6 +498,28 @@ class GitHubClient:
         result: dict[str, Any] = response.json()
         return result
 
+    async def list_check_suites_for_ref(
+        self,
+        repo: str,
+        ref: str,
+        installation_id: int,
+    ) -> list[dict[str, Any]]:
+        """List check suites for a git reference (SHA, branch, or tag).
+
+        Returns the ``check_suites`` array. Used to detect when a commit
+        has been pushed but check runs haven't been created yet — the
+        check suite will be ``queued`` or ``in_progress`` with zero
+        check runs.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/commits/{ref}/check-suites",
+            installation_id=installation_id,
+        )
+        data: dict[str, Any] = response.json()
+        result: list[dict[str, Any]] = data.get("check_suites", [])
+        return result
+
     async def create_review(
         self,
         repo: str,

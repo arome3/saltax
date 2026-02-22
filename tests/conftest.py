@@ -234,6 +234,7 @@ def mock_github_client() -> AsyncMock:
     client.get_combined_status_for_ref = AsyncMock(
         return_value={"state": "", "total_count": 0},
     )
+    client.list_check_suites_for_ref = AsyncMock(return_value=[])
     return client
 
 

@@ -532,8 +532,36 @@ class VerificationScheduler:
         has_external_checks = len(external_checks) > 0
         has_status_checks = status_count > 0
 
-        # 5. If no external checks at all → NO_CI (don't block repos without CI)
+        # 5. If no external checks at all, verify it's genuinely a repo
+        #    without CI — not a freshly-pushed commit whose checks haven't
+        #    started yet.  A queued/in-progress check_suite with zero check
+        #    runs means GitHub Actions is still provisioning runners.
         if not has_external_checks and not has_status_checks:
+            try:
+                check_suites = await self._github_client.list_check_suites_for_ref(
+                    repo, head_sha, installation_id,
+                )
+                pending_suites = [
+                    cs for cs in check_suites
+                    if cs.get("status") in ("queued", "in_progress")
+                ]
+                if pending_suites:
+                    logger.info(
+                        "CI gate: check suites pending but no runs yet, "
+                        "treating as PENDING to avoid race",
+                        extra={
+                            "repo": repo,
+                            "pr_number": pr_number,
+                            "pending_suites": len(pending_suites),
+                        },
+                    )
+                    return CIGateResult.PENDING
+            except Exception:
+                logger.debug(
+                    "CI gate: failed to fetch check suites, treating as NO_CI",
+                    extra={"repo": repo, "pr_number": pr_number},
+                )
+
             logger.debug(
                 "CI gate: no external CI checks found",
                 extra={"repo": repo, "pr_number": pr_number},

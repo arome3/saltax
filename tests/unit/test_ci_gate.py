@@ -51,9 +51,11 @@ def _make_github_client(
     check_runs: list[dict] | None = None,
     combined_state: str = "",
     combined_count: int = 0,
+    check_suites: list[dict] | None = None,
     pr_head_sha: str = "abc123",
     get_pr_error: bool = False,
     ci_fetch_error: bool = False,
+    check_suites_error: bool = False,
 ) -> AsyncMock:
     """Build a mock GitHubClient with configurable CI responses."""
     client = AsyncMock()
@@ -79,6 +81,15 @@ def _make_github_client(
         )
         client.get_combined_status_for_ref = AsyncMock(
             return_value={"state": combined_state, "total_count": combined_count},
+        )
+
+    if check_suites_error:
+        client.list_check_suites_for_ref = AsyncMock(
+            side_effect=RuntimeError("API down"),
+        )
+    else:
+        client.list_check_suites_for_ref = AsyncMock(
+            return_value=check_suites if check_suites is not None else [],
         )
 
     return client
@@ -369,6 +380,93 @@ class TestCheckCIStatusUnit:
         result = await scheduler._check_ci_status("owner/repo", 1, 12345)
         assert result == CIGateResult.FAILED
 
+    # -- Race condition: pending check suites with no check runs ---------------
+
+    async def test_pending_check_suites_no_runs_returns_pending(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """Queued check suite + zero check runs → PENDING (not NO_CI).
+
+        Regression test for the race condition where a newly-pushed commit
+        has check suites created but check runs haven't been provisioned yet.
+        """
+        client = _make_github_client(
+            check_runs=[],
+            combined_count=0,
+            check_suites=[{"status": "queued", "app": {"slug": "github-actions"}}],
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        result = await scheduler._check_ci_status("owner/repo", 1, 12345)
+        assert result == CIGateResult.PENDING
+
+    async def test_in_progress_check_suite_no_runs_returns_pending(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """In-progress check suite + zero check runs → PENDING."""
+        client = _make_github_client(
+            check_runs=[],
+            combined_count=0,
+            check_suites=[
+                {"status": "in_progress", "app": {"slug": "github-actions"}},
+            ],
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        result = await scheduler._check_ci_status("owner/repo", 1, 12345)
+        assert result == CIGateResult.PENDING
+
+    async def test_completed_check_suite_no_runs_returns_no_ci(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """Completed check suite + zero check runs → NO_CI.
+
+        A completed suite with no runs means the suite finished without
+        producing any meaningful checks (e.g. a skipped workflow).
+        """
+        client = _make_github_client(
+            check_runs=[],
+            combined_count=0,
+            check_suites=[{"status": "completed", "app": {"slug": "github-actions"}}],
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        result = await scheduler._check_ci_status("owner/repo", 1, 12345)
+        assert result == CIGateResult.NO_CI
+
+    async def test_check_suites_api_error_falls_back_to_no_ci(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """Check suites API failure → falls back to NO_CI (fail-open)."""
+        client = _make_github_client(
+            check_runs=[],
+            combined_count=0,
+            check_suites_error=True,
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        result = await scheduler._check_ci_status("owner/repo", 1, 12345)
+        assert result == CIGateResult.NO_CI
+
+    async def test_own_check_excluded_pending_suite_returns_pending(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """Only SaltaX's own check run + queued suite → PENDING.
+
+        Even though we filter out our own check, a pending suite means
+        external CI is still spinning up.
+        """
+        client = _make_github_client(
+            check_runs=[
+                {
+                    "name": "SaltaX Pipeline",
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+            ],
+            combined_count=0,
+            check_suites=[{"status": "queued", "app": {"slug": "github-actions"}}],
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        result = await scheduler._check_ci_status("owner/repo", 1, 12345)
+        assert result == CIGateResult.PENDING
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # B. Integration tests — CI gate + scheduler merge sites
@@ -539,3 +637,29 @@ class TestCIGateIntegration:
         window = await intel_db.get_verification_window("win-1")
         assert window["status"] == "resolved"
         client.merge_pr.assert_awaited_once()
+
+    # -- Race condition integration tests --------------------------------------
+
+    async def test_pending_check_suite_blocks_merge(
+        self, sample_config, intel_db, mock_treasury_mgr,
+    ):
+        """Queued check suite + zero runs → PENDING → window stays open.
+
+        Regression test for the race condition: a new commit was pushed,
+        check suites are queued but check runs haven't appeared yet.
+        The scheduler must NOT merge.
+        """
+        past = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        await _store_window(intel_db, closes_at=past)
+
+        client = _make_github_client(
+            check_runs=[],
+            combined_count=0,
+            check_suites=[{"status": "queued", "app": {"slug": "github-actions"}}],
+        )
+        scheduler = _make_scheduler(sample_config, intel_db, client, mock_treasury_mgr)
+        await scheduler._tick()
+
+        window = await intel_db.get_verification_window("win-1")
+        assert window["status"] == "open"
+        client.merge_pr.assert_not_awaited()
