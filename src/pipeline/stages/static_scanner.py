@@ -132,6 +132,19 @@ async def run_static_scan(
 
         counts = _count_by_severity(findings)
         elapsed = time.monotonic() - t0
+
+        # Log individual findings for traceability
+        for f in findings:
+            logger.info(
+                "  finding: %s | %s | %s:%d-%d | %s",
+                f.severity.value,
+                f.rule_id,
+                f.file_path,
+                f.line_start,
+                f.line_end,
+                f.message[:120],
+            )
+
         logger.info(
             "Static scan completed: %d finding(s) in %.1fs | %s | short_circuit=%s",
             len(findings),
