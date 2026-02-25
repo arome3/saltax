@@ -247,21 +247,21 @@ class TestDetectLanguage:
     def test_empty_dir(self, tmp_path: Path) -> None:
         assert _detect_language(tmp_path) is None
 
-    def test_priority_nodejs_over_python(self, tmp_path: Path) -> None:
-        """When both package.json and pyproject.toml exist, nodejs wins."""
+    def test_priority_python_over_nodejs(self, tmp_path: Path) -> None:
+        """When both pyproject.toml and package.json exist, python wins."""
         (tmp_path / "package.json").touch()
         (tmp_path / "pyproject.toml").touch()
         lang = _detect_language(tmp_path)
         assert lang is not None
-        assert lang.name == "nodejs"
+        assert lang.name == "python"
 
-    def test_priority_rust_over_python(self, tmp_path: Path) -> None:
-        """When both Cargo.toml and pyproject.toml exist, rust wins (PyO3)."""
+    def test_priority_python_over_rust(self, tmp_path: Path) -> None:
+        """When both pyproject.toml and Cargo.toml exist, python wins."""
         (tmp_path / "pyproject.toml").touch()
         (tmp_path / "Cargo.toml").touch()
         lang = _detect_language(tmp_path)
         assert lang is not None
-        assert lang.name == "rust"
+        assert lang.name == "python"
 
     def test_priority_nodejs_over_rust(self, tmp_path: Path) -> None:
         """When both package.json and Cargo.toml exist, nodejs wins."""
@@ -394,7 +394,7 @@ class TestRunTestsHappyPath:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]  # nodejs
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -420,7 +420,7 @@ class TestRunTestsHappyPath:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[2]  # python
+            mock_detect.return_value = _LANGUAGES[0]  # python
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -446,7 +446,7 @@ class TestRunTestsHappyPath:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[1]  # rust
+            mock_detect.return_value = _LANGUAGES[2]  # rust
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -515,7 +515,7 @@ class TestRunTestsFailureCases:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]  # nodejs (no fallback)
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs (no fallback)
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -551,7 +551,7 @@ class TestRunTestsFailureCases:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[2]  # python
+            mock_detect.return_value = _LANGUAGES[0]  # python
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -596,7 +596,7 @@ class TestRunTestsFailureCases:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -642,7 +642,7 @@ class TestRunTestsFailureCases:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]  # nodejs
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
         assert state.test_results is not None
@@ -688,7 +688,7 @@ class TestRunCmdMemory:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
         # Install + test both call _set_resource_limits with config value
@@ -791,7 +791,7 @@ class TestTempDirCleanup:
         ):
             from src.pipeline.stages.test_executor import _LANGUAGES
 
-            mock_detect.return_value = _LANGUAGES[0]
+            mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
         mock_rmtree.assert_called_once()

@@ -52,6 +52,13 @@ class _LangConfig:
 
 _LANGUAGES: tuple[_LangConfig, ...] = (
     _LangConfig(
+        name="python",
+        detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
+        install_cmd=["pip", "install", "-e", ".[test]", "--quiet"],
+        install_fallback=["pip", "install", "-e", ".", "--quiet"],
+        test_cmd=["python", "-m", "pytest", "--tb=short", "-q"],
+    ),
+    _LangConfig(
         name="nodejs",
         detect_files=("package.json",),
         install_cmd=["npm", "ci", "--ignore-scripts"],
@@ -64,13 +71,6 @@ _LANGUAGES: tuple[_LangConfig, ...] = (
         install_cmd=["cargo", "fetch"],
         install_fallback=None,
         test_cmd=["cargo", "test"],
-    ),
-    _LangConfig(
-        name="python",
-        detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
-        install_cmd=["pip", "install", "-e", ".[test]", "--quiet"],
-        install_fallback=["pip", "install", "-e", ".", "--quiet"],
-        test_cmd=["python", "-m", "pytest", "--tb=short", "-q"],
     ),
 )
 
