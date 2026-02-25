@@ -306,6 +306,11 @@ async def _run_test_suite(
     total = passed_count + failed_count + skipped_count
     rc = proc.returncode or 0
 
+    # Log output tail when tests fail or zero tests collected for debugging
+    if rc != 0 or total == 0:
+        logger.info("Test exit_code=%d, stdout_tail: %s", rc, stdout_text[-500:])
+        logger.info("Test stderr_tail: %s", stderr_text[-500:])
+
     return TestResult(
         passed=rc == 0 and failed_count == 0 and total > 0,
         total_tests=total,
