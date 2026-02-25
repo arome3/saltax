@@ -268,11 +268,13 @@ class PatrolScheduler:
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _get_monitored_repos(self) -> list[str]:
-        """Return the list of repos this agent monitors.
+        """Return the list of repos to patrol.
 
-        For now, uses the agent's own repo from config. Future: dynamic
-        repo discovery via GitHub App installations.
+        Uses ``patrol.repos`` if configured, otherwise falls back to
+        ``agent.repo`` for backward compatibility.
         """
+        if self._config.patrol.repos:
+            return list(self._config.patrol.repos)
         agent_repo = self._config.agent.repo
         if agent_repo:
             return [agent_repo]

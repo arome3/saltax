@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import asyncio
 import json
 from datetime import UTC, datetime
@@ -28,6 +30,11 @@ from src.models.attestation import AttestationProof
 
 _ = pytest  # ensure pytest is used (fixture injection)
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
 _ENGINE_MODULE = "src.attestation.engine"
 
 
@@ -35,15 +42,26 @@ _ENGINE_MODULE = "src.attestation.engine"
 
 
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB backed by a tmp_path SQLite file."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by PostgreSQL."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 @pytest.fixture()

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
+
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +15,11 @@ from src.intelligence.database import IntelligenceDB
 from src.models.identity import AgentIdentity
 
 _ = pytest  # ensure pytest is used (fixture injection)
+
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -84,15 +90,26 @@ class FakeBridgeClient:
 
 
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB with identity cache table."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test_identity.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by PostgreSQL."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 # ── TestIdentityRegistrar ────────────────────────────────────────────────────
@@ -535,9 +552,10 @@ class TestIdentityCache:
 
     async def test_table_exists_after_init(self, intel_db):
         """agent_identity_cache table exists after initialization."""
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='agent_identity_cache'"
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT tablename FROM pg_catalog.pg_tables "
+                "WHERE schemaname = 'public' AND tablename = 'agent_identity_cache'"
+            )
             row = await cursor.fetchone()
             assert row is not None

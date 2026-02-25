@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,7 +23,6 @@ def dispute_config() -> DisputeConfig:
 @pytest.fixture()
 def mock_intel_db() -> AsyncMock:
     db = AsyncMock()
-    db._write_lock = MagicMock()
     return db
 
 

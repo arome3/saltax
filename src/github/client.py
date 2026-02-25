@@ -847,6 +847,24 @@ class GitHubClient:
         result: list[dict[str, Any]] = response.json()
         return result
 
+    async def get_issue(
+        self,
+        repo: str,
+        issue_number: int,
+        installation_id: int,
+    ) -> dict[str, Any]:
+        """Fetch a single issue by number.
+
+        Returns the full issue object including labels.
+        """
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/issues/{issue_number}",
+            installation_id=installation_id,
+        )
+        result: dict[str, Any] = response.json()
+        return result
+
     async def list_issues(
         self,
         repo: str,

@@ -7,6 +7,7 @@ state transitions, scheduler execution, crash recovery, and concurrency.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,20 +26,36 @@ from src.verification.window import (
 
 _ = pytest  # ensure pytest is used (fixture injection)
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB with schema v3."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by PostgreSQL."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 @pytest.fixture()
@@ -721,12 +738,12 @@ class TestSchedulerRunLoop:
 
 
 class TestStakeDefaults:
-    """Test that stake_amount_wei defaults to bounty when not specified."""
+    """Test that stake_amount_wei defaults to zero (no phantom stake)."""
 
-    async def test_stake_defaults_to_bounty(
+    async def test_stake_defaults_to_zero(
         self, intel_db, verification_config,
     ) -> None:
-        """When no explicit stake, stake_amount_wei equals bounty_amount_wei."""
+        """When no explicit stake, stake_amount_wei is zero."""
         window_id = await create_window(
             intel_db=intel_db,
             config=verification_config,
@@ -742,7 +759,7 @@ class TestStakeDefaults:
             is_self_modification=False,
         )
         window = await intel_db.get_verification_window(window_id)
-        assert window["stake_amount_wei"] == "5000"
+        assert window["stake_amount_wei"] == "0"
 
     async def test_explicit_stake_overrides_default(
         self, intel_db, verification_config,
@@ -857,14 +874,12 @@ class TestChallengeDeadline:
             challenge_rationale="Suspicious",
         )
         # Backdate updated_at to 8 days ago (deadline is 7 days)
-        db = intel_db._require_db()
         old_time = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-        async with intel_db._write_lock:
-            await db.execute(
-                "UPDATE verification_windows SET updated_at = ? WHERE id = ?",
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE verification_windows SET updated_at = %s WHERE id = %s",
                 (old_time, "stale-ch"),
             )
-            await db.commit()
 
         await scheduler._tick()
 

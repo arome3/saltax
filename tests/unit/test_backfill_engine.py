@@ -82,7 +82,8 @@ def _fake_issue(number: int) -> dict[str, Any]:
     }
 
 
-_FAKE_EMBEDDING = np.ones(128, dtype=np.float32)
+_FAKE_VECTOR = np.ones(128, dtype=np.float32)
+_FAKE_EMBEDDING = (_FAKE_VECTOR, "test-model")
 
 
 # ── Test 1: embedding_only happy path ────────────────────────────────────────
@@ -248,7 +249,7 @@ async def test_stop_event_pauses(mock_embed):
 @patch("src.backfill.engine.embed_issue", new_callable=AsyncMock)
 async def test_issue_backfill_skips_prs(mock_embed_issue):
     """Issues-only mode filters out items with pull_request key."""
-    mock_embed_issue.return_value = _FAKE_EMBEDDING
+    mock_embed_issue.return_value = _FAKE_VECTOR
 
     config = _make_config()
     env = _make_env()
@@ -599,7 +600,7 @@ async def test_rate_limit_on_diff_fetch_triggers_handler(mock_embed):
 async def test_full_mode_runs_both_phases(mock_embed_diff, mock_embed_issue):
     """Full mode calls both list_pull_requests and list_issues."""
     mock_embed_diff.return_value = _FAKE_EMBEDDING
-    mock_embed_issue.return_value = _FAKE_EMBEDDING
+    mock_embed_issue.return_value = _FAKE_VECTOR
 
     config = _make_config()
     env = _make_env()
@@ -673,7 +674,7 @@ async def test_consecutive_404_aborts():
 async def test_full_mode_counters_isolated(mock_embed_diff, mock_embed_issue):
     """Full mode returns summed totals with isolated per-phase counting."""
     mock_embed_diff.return_value = _FAKE_EMBEDDING
-    mock_embed_issue.return_value = _FAKE_EMBEDDING
+    mock_embed_issue.return_value = _FAKE_VECTOR
 
     config = _make_config()
     env = _make_env()

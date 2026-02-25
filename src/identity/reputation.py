@@ -50,7 +50,7 @@ class ReputationManager:
     feedback.  All bridge calls are fire-and-forget — failures are
     logged but never raised.
 
-    Concurrency: reads only from intel_db (no ``_write_lock`` needed).
+    Concurrency: reads only from intel_db (PostgreSQL MVCC handles concurrency).
     Bridge calls are independent (no shared mutable state).
     """
 
@@ -109,23 +109,23 @@ class ReputationManager:
             return ReputationMetrics()
 
         try:
-            db = self._intel_db._require_db()
+            pool = self._intel_db.pool
 
-            # Total PRs reviewed
-            async with db.execute(
-                "SELECT COUNT(*) FROM pipeline_history",
-            ) as cursor:
-                row = await cursor.fetchone()
-                total_reviewed = row[0] if row else 0
+            async with pool.connection() as conn:
+                # Total PRs reviewed
+                row = await (
+                    await conn.execute("SELECT COUNT(*) AS cnt FROM pipeline_history")
+                ).fetchone()
+                total_reviewed = row["cnt"] if row else 0
 
-            # Approved PRs — json_extract for exact field matching
-            async with db.execute(
-                "SELECT COUNT(*) FROM pipeline_history "
-                "WHERE LOWER(json_extract(verdict, '$.decision')) "
-                "IN ('approve', 'approved')",
-            ) as cursor:
-                row = await cursor.fetchone()
-                total_approved = row[0] if row else 0
+                # Approved PRs — cast TEXT verdict to JSONB for field extraction
+                row = await (
+                    await conn.execute(
+                        "SELECT COUNT(*) AS cnt FROM pipeline_history "
+                        "WHERE LOWER((verdict::jsonb)->>'decision') IN ('approve', 'approved')",
+                    )
+                ).fetchone()
+                total_approved = row["cnt"] if row else 0
 
             total_rejected = total_reviewed - total_approved
 
@@ -133,12 +133,14 @@ class ReputationManager:
             vuln_count = await self._intel_db.count_patterns()
 
             # Total bounties paid (claimed bounties, ETH → wei)
-            async with db.execute(
-                "SELECT COALESCE(SUM(amount_eth), 0.0) "
-                "FROM active_bounties WHERE status = 'claimed'",
-            ) as cursor:
-                row = await cursor.fetchone()
-                total_bounties_eth = row[0] if row else 0.0
+            async with pool.connection() as conn:
+                row = await (
+                    await conn.execute(
+                        "SELECT COALESCE(SUM(amount_eth), 0.0) AS total "
+                        "FROM active_bounties WHERE status = 'claimed'",
+                    )
+                ).fetchone()
+                total_bounties_eth = row["total"] if row else 0.0
 
             uptime = int(time.monotonic() - self._boot_time)
 

@@ -345,31 +345,46 @@ async def dispatch_decision(
             )
         return  # HARD CONSTRAINT: explicit return — create_window unreachable
 
-    # Autonomous mode: open verification window on APPROVE
-    if config.triage.mode == "autonomous" and decision == "APPROVE":
-        from src.verification.window import create_window  # noqa: PLC0415
+    # Autonomous mode
+    if config.triage.mode == "autonomous":
+        if decision == "APPROVE":
+            # APPROVE: open verification window → auto-merge → bounty payout
+            from src.verification.window import create_window  # noqa: PLC0415
 
-        attestation = state.attestation or {}
-        if state.pr_number is not None and state.installation_id is not None:
+            attestation = state.attestation or {}
+            if state.pr_number is not None and state.installation_id is not None:
+                try:
+                    await create_window(
+                        intel_db=intel_db,
+                        config=config.verification,
+                        pr_id=state.pr_id,
+                        repo=state.repo,
+                        pr_number=state.pr_number,
+                        installation_id=state.installation_id,
+                        attestation_id=str(attestation.get("attestation_id", "")),
+                        verdict=state.verdict,
+                        attestation=attestation,
+                        contributor_address=state.pr_author_wallet,
+                        bounty_amount_wei=state.bounty_amount_wei,
+                        stake_amount_wei=None,
+                        is_self_modification=state.is_self_modification,
+                    )
+                except Exception:
+                    logger.error(
+                        "Verification window creation failed",
+                        exc_info=True,
+                        extra={"pr_id": state.pr_id},
+                    )
+        else:
+            # Non-APPROVE (REQUEST_CHANGES / COMMENT): post advisory review
+            # so the contributor receives feedback on what to fix.
             try:
-                await create_window(
-                    intel_db=intel_db,
-                    config=config.verification,
-                    pr_id=state.pr_id,
-                    repo=state.repo,
-                    pr_number=state.pr_number,
-                    installation_id=state.installation_id,
-                    attestation_id=str(attestation.get("attestation_id", "")),
-                    verdict=state.verdict,
-                    attestation=attestation,
-                    contributor_address=state.pr_author_wallet,
-                    bounty_amount_wei=state.bounty_amount_wei,
-                    stake_amount_wei=state.bounty_amount_wei,
-                    is_self_modification=state.is_self_modification,
+                await post_advisory_review(
+                    state, config.triage.advisory, github_client,
                 )
             except Exception:
                 logger.error(
-                    "Verification window creation failed",
+                    "Advisory review failed for non-approve autonomous decision",
                     exc_info=True,
-                    extra={"pr_id": state.pr_id},
+                    extra={"pr_id": state.pr_id, "decision": decision},
                 )

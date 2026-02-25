@@ -220,7 +220,6 @@ async def _graceful_shutdown(
     dispute_scheduler: DisputeScheduler,
     dispute_scheduler_task: asyncio.Task[None],
     intel_db: IntelligenceDB,
-    kms: KMSSealManager,
     wallet: WalletManager,
     identity: IdentityRegistrar,
     ts_proxy: TSProxyManager,
@@ -258,9 +257,9 @@ async def _graceful_shutdown(
                 logger.exception("Error stopping scheduler")
 
             try:
-                await intel_db.seal(kms)
+                await intel_db.close()
             except Exception:
-                logger.exception("Error sealing intelligence DB")
+                logger.exception("Error closing intelligence DB")
 
             try:
                 await wallet.seal()
@@ -356,7 +355,11 @@ async def bootstrap() -> None:  # noqa: C901
     # ── Phase 3: State Recovery ──────────────────────────────────────────
     try:
         logger.info("Phase 3: State Recovery")
-        intel_db = IntelligenceDB(kms=kms)
+        intel_db = IntelligenceDB(
+            database_url=env.database_url,
+            pool_min_size=config.database.pool_min_size,
+            pool_max_size=config.database.pool_max_size,
+        )
         await intel_db.initialize()
         resources.append(("intel_db", intel_db))
         pattern_count = await intel_db.count_patterns()
@@ -421,8 +424,7 @@ async def bootstrap() -> None:  # noqa: C901
         )
         resources.append(("payment_verifier", payment_verifier))
 
-        tx_store = TxHashStore(db_path="data/tx_hashes.db")
-        await tx_store.initialize()
+        tx_store = TxHashStore(pool=intel_db.pool)
         resources.append(("tx_store", tx_store))
 
         reputation_mgr = ReputationManager(
@@ -558,7 +560,6 @@ async def bootstrap() -> None:  # noqa: C901
         dispute_scheduler=dispute_scheduler,
         dispute_scheduler_task=dispute_scheduler_task,
         intel_db=intel_db,
-        kms=kms,
         wallet=wallet,
         identity=identity,
         ts_proxy=ts_proxy,

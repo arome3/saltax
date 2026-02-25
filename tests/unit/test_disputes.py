@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -14,6 +16,11 @@ from src.disputes.eigen_verify import EigenVerifyClient
 from src.disputes.eigen_verify import CircuitBreaker, CircuitBreakerOpenError
 from src.disputes.molt_court import MoltCourtClient
 from src.disputes.scheduler import DisputeScheduler
+
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -425,27 +432,31 @@ class TestDisputeScheduler:
 
 
 class TestDisputeDB:
-    """Integration tests for dispute CRUD on a real aiosqlite DB."""
+    """Integration tests for dispute CRUD on a real PostgreSQL DB."""
 
     @pytest.fixture()
-    async def intel_db(self, tmp_path):
-        """Create a real IntelligenceDB with schema v5."""
+    async def intel_db(self):
+        """Create a real IntelligenceDB backed by PostgreSQL."""
         from src.intelligence.database import IntelligenceDB  # noqa: PLC0415
 
-        mock_kms = AsyncMock()
-        mock_kms.unseal.side_effect = Exception("no sealed DB")
-        # Patch DB_PATH to use tmp_path
-        import src.intelligence.database as db_mod  # noqa: PLC0415
-
-        original_path = db_mod.DB_PATH
-        db_mod.DB_PATH = tmp_path / "test_intel.db"
+        db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
+        await db.initialize()
         try:
-            db = IntelligenceDB(kms=mock_kms)
-            await db.initialize()
             yield db
-            await db.close()
         finally:
-            db_mod.DB_PATH = original_path
+            try:
+                pool = db.pool
+                async with pool.connection() as conn:
+                    tables = await (
+                        await conn.execute(
+                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                        )
+                    ).fetchall()
+                    for t in tables:
+                        await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+            except Exception:
+                pass
+            await db.close()
 
     async def test_store_and_get_dispute(self, intel_db) -> None:
         await intel_db.store_dispute_record(

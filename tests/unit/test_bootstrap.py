@@ -447,12 +447,10 @@ class TestGracefulShutdown:
 
         intel_db = MagicMock()
 
-        async def track_seal(kms: object) -> None:
-            order.append("intel_db.seal")
+        async def track_close() -> None:
+            order.append("intel_db.close")
 
-        intel_db.seal = track_seal
-
-        kms = MagicMock()
+        intel_db.close = track_close
 
         wallet = MagicMock()
 
@@ -479,7 +477,6 @@ class TestGracefulShutdown:
             dispute_scheduler=dispute_scheduler,
             dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
-            kms=kms,
             wallet=wallet,
             identity=identity,
             ts_proxy=ts_proxy,
@@ -488,7 +485,7 @@ class TestGracefulShutdown:
         assert server.should_exit is True
         assert order == [
             "dispute_scheduler.stop", "scheduler.stop",
-            "intel_db.seal", "wallet.seal", "ts_proxy.stop",
+            "intel_db.close", "wallet.seal", "ts_proxy.stop",
         ]
 
     async def test_shutdown_continues_on_step_error(self) -> None:
@@ -513,12 +510,10 @@ class TestGracefulShutdown:
 
         intel_db = MagicMock()
 
-        async def track_seal(kms: object) -> None:
-            order.append("intel_db.seal")
+        async def track_close() -> None:
+            order.append("intel_db.close")
 
-        intel_db.seal = track_seal
-
-        kms = MagicMock()
+        intel_db.close = track_close
 
         wallet = MagicMock()
         wallet.seal = AsyncMock()
@@ -541,14 +536,13 @@ class TestGracefulShutdown:
             dispute_scheduler=dispute_scheduler,
             dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
-            kms=kms,
             wallet=wallet,
             identity=identity,
             ts_proxy=ts_proxy,
         )
 
         # All steps attempted despite scheduler.stop raising
-        assert order == ["scheduler.stop", "intel_db.seal", "ts_proxy.stop"]
+        assert order == ["scheduler.stop", "intel_db.close", "ts_proxy.stop"]
 
     async def test_shutdown_timeout(self) -> None:
         """If a shutdown step hangs, the timeout fires and shutdown completes."""
@@ -568,7 +562,6 @@ class TestGracefulShutdown:
         scheduler.stop = AsyncMock()
 
         intel_db = MagicMock()
-        kms = MagicMock()
         wallet = MagicMock()
         wallet.seal = AsyncMock()
         ts_proxy = MagicMock()
@@ -585,7 +578,6 @@ class TestGracefulShutdown:
             dispute_scheduler=dispute_scheduler,
             dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
-            kms=kms,
             wallet=wallet,
             identity=identity,
             ts_proxy=ts_proxy,
@@ -595,7 +587,7 @@ class TestGracefulShutdown:
         # Nothing after dispute_scheduler.stop should have been called
         # because it hung and the timeout fired first
         scheduler.stop.assert_not_called()
-        intel_db.seal.assert_not_called()
+        intel_db.close.assert_not_called()
         ts_proxy.stop.assert_not_called()
 
     async def test_shutdown_cancels_dangling_tasks(self) -> None:
@@ -619,13 +611,7 @@ class TestGracefulShutdown:
         scheduler.stop = noop_stop
 
         intel_db = MagicMock()
-
-        async def noop_seal(kms: object) -> None:
-            pass
-
-        intel_db.seal = noop_seal
-
-        kms = MagicMock()
+        intel_db.close = AsyncMock()
 
         wallet = MagicMock()
         wallet.seal = AsyncMock()
@@ -648,7 +634,6 @@ class TestGracefulShutdown:
             dispute_scheduler=dispute_scheduler,
             dispute_scheduler_task=dispute_scheduler_task,
             intel_db=intel_db,
-            kms=kms,
             wallet=wallet,
             identity=identity,
             ts_proxy=ts_proxy,

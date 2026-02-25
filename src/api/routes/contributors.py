@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
 from src.api.deps import get_intel_db
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_ETH_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 @router.get("/contributors")
@@ -59,3 +62,34 @@ async def get_contributor(
                      "detail": f"Contributor '{contributor_id}' not found"},
         )
     return JSONResponse(status_code=200, content=record)
+
+
+@router.put("/contributors/{github_login}/wallet")
+async def set_contributor_wallet(
+    github_login: str,
+    wallet_address: str = Body(..., embed=True),
+    intel_db: IntelligenceDB = Depends(get_intel_db),  # noqa: B008
+) -> JSONResponse:
+    """Register or update a contributor's payout wallet address."""
+    if not _ETH_ADDRESS_RE.match(wallet_address):
+        return JSONResponse(
+            status_code=422,
+            content={"status_code": 422, "error": "Unprocessable Entity",
+                     "detail": "Invalid Ethereum address format"},
+        )
+    try:
+        await intel_db.set_contributor_wallet(github_login, wallet_address)
+    except RuntimeError:
+        return JSONResponse(
+            status_code=503,
+            content={"status_code": 503, "error": "Service Unavailable",
+                     "detail": "Intelligence database is unavailable"},
+        )
+    logger.info(
+        "Contributor wallet registered",
+        extra={"github_login": github_login, "wallet": wallet_address},
+    )
+    return JSONResponse(
+        status_code=200,
+        content={"github_login": github_login, "wallet_address": wallet_address},
+    )

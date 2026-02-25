@@ -318,6 +318,7 @@ class PatrolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    repos: list[str] = Field(default_factory=list)
     interval_seconds: int = Field(default=21600, gt=0)
     max_concurrent_repos: int = Field(default=3, ge=1)
     dependency_audit: DependencyAuditConfig = Field(default_factory=DependencyAuditConfig)
@@ -340,6 +341,17 @@ class BackfillConfig(BaseModel):
     default_mode: str = "full"
 
 
+class DatabaseConfig(BaseModel):
+    """Connection pool tuning for the external PostgreSQL (Supabase) database."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pool_min_size: int = Field(default=2, ge=1)
+    pool_max_size: int = Field(default=10, ge=1)
+    pool_timeout: float = Field(default=30.0, gt=0)
+    statement_timeout_ms: int = Field(default=30_000, gt=0)
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -358,6 +370,7 @@ class SaltaXConfig(BaseModel):
 
     version: str = "1.0"
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     treasury: TreasuryConfig = Field(default_factory=TreasuryConfig)
     bounties: BountyConfig = Field(default_factory=BountyConfig)
@@ -414,6 +427,7 @@ class EnvConfig(BaseSettings):
     github_app_private_key: str
     github_webhook_secret: str
     eigencloud_kms_endpoint: str
+    database_url: str
 
     @field_validator("github_app_private_key", mode="after")
     @classmethod
@@ -564,5 +578,13 @@ def validate_config(cfg: SaltaXConfig) -> list[str]:
             "patrol.enabled is True but both dependency_audit and "
             "codebase_scan are disabled — patrol has nothing to scan"
         )
+
+    # 13. Validate patrol.repos entries are 'owner/repo' format
+    if cfg.patrol.enabled and cfg.patrol.repos:
+        for i, r in enumerate(cfg.patrol.repos):
+            if not r or "/" not in r:
+                errors.append(
+                    f"patrol.repos[{i}] must be 'owner/repo' format, got {r!r}"
+                )
 
     return errors

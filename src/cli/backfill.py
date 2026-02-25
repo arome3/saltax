@@ -47,11 +47,13 @@ async def _run_backfill(
     # Import heavy dependencies only after config is loaded
     from src.github.client import GitHubClient  # noqa: PLC0415
     from src.intelligence.database import IntelligenceDB  # noqa: PLC0415
-    from src.intelligence.sealing import KMSSealManager  # noqa: PLC0415
 
     # Bootstrap core services
-    kms = KMSSealManager(env.eigencloud_kms_endpoint)
-    intel_db = IntelligenceDB(kms)
+    intel_db = IntelligenceDB(
+        database_url=env.database_url,
+        pool_min_size=config.database.pool_min_size,
+        pool_max_size=config.database.pool_max_size,
+    )
     github_client = GitHubClient(
         app_id=env.github_app_id,
         private_key=env.github_app_private_key,
@@ -107,7 +109,7 @@ async def _run_backfill(
         return results
 
     finally:
-        await intel_db.seal(kms)
+        await intel_db.close()
         await github_client.close()
 
 

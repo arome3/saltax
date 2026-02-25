@@ -41,8 +41,19 @@ WORKDIR /app
 # install can find the package (editable install would fail without source).
 COPY pyproject.toml ./
 COPY src/ ./src/
-RUN pip install ".[prod]" --no-cache-dir
+ENV PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=5
+RUN pip install --upgrade pip
+RUN pip install ".[prod,embed]" --no-cache-dir
 RUN pip install pip-audit --no-cache-dir
+RUN pip install semgrep --no-cache-dir
+
+# Pre-download fastembed model so the container runs fully offline.
+# bge-small-en-v1.5 int8 ONNX: ~33 MB
+RUN python -c "\
+from fastembed import TextEmbedding; \
+list(TextEmbedding('BAAI/bge-small-en-v1.5', cache_dir='/app/model_cache').embed(['warmup']))"
+ENV HF_HUB_OFFLINE=1
+ENV FASTEMBED_CACHE_PATH=/app/model_cache
 
 # Copy TS proxy build artifacts
 COPY --from=ts-builder /app/github-proxy/dist ./github-proxy/dist

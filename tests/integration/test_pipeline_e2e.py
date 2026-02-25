@@ -153,18 +153,18 @@ class TestPipelineIntegration:
         )
 
         # Verify pipeline_history row was written
-        db = mock_intel_db._require_db()
-        async with db.execute(
-            "SELECT pr_id, repo, verdict FROM pipeline_history WHERE pr_id = ?",
-            (state.pr_id,),
-        ) as cursor:
+        async with mock_intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT pr_id, repo, verdict FROM pipeline_history WHERE pr_id = %s",
+                (state.pr_id,),
+            )
             row = await cursor.fetchone()
 
         if row is None:
             raise RuntimeError("Expected pipeline_history row but found none")
-        assert row[0] == "owner/repo#42"
-        assert row[1] == "owner/repo"
-        assert "APPROVE" in row[2]
+        assert row["pr_id"] == "owner/repo#42"
+        assert row["repo"] == "owner/repo"
+        assert "APPROVE" in row["verdict"]
 
     async def test_pipeline_reject_static_critical(
         self, mock_intel_db: IntelligenceDB, monkeypatch: pytest.MonkeyPatch,
@@ -213,13 +213,13 @@ class TestPipelineIntegration:
             author=state.pr_author,
         )
 
-        db = mock_intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM vulnerability_patterns",
-        ) as cursor:
-            (count,) = await cursor.fetchone()  # type: ignore[misc]
+        async with mock_intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM vulnerability_patterns",
+            )
+            row = await cursor.fetchone()
 
-        assert count >= 1
+        assert row["count"] >= 1
 
     async def test_pipeline_updates_contributor_profile(
         self, mock_intel_db: IntelligenceDB, monkeypatch: pytest.MonkeyPatch,
@@ -246,15 +246,15 @@ class TestPipelineIntegration:
             author=state.pr_author,
         )
 
-        db = mock_intel_db._require_db()
-        async with db.execute(
-            "SELECT github_login, total_submissions FROM contributor_profiles "
-            "WHERE github_login = ?",
-            ("alice",),
-        ) as cursor:
+        async with mock_intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT github_login, total_submissions FROM contributor_profiles "
+                "WHERE github_login = %s",
+                ("alice",),
+            )
             row = await cursor.fetchone()
 
         if row is None:
             raise RuntimeError("Expected contributor_profiles row but found none")
-        assert row[0] == "alice"
-        assert row[1] == 1
+        assert row["github_login"] == "alice"
+        assert row["total_submissions"] == 1

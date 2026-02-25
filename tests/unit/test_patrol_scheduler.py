@@ -28,6 +28,7 @@ def _make_config(*, patrol_enabled: bool = True, agent_repo: str = "owner/repo")
         patrol=PatrolConfig(
             enabled=patrol_enabled,
             interval_seconds=1,
+            repos=["owner/repo"],
         ),
     )
 
@@ -191,6 +192,38 @@ class TestPatrolSchedulerLifecycle:
         mock_rmtree.assert_called_once_with(
             "/tmp/test-patrol-cleanup", ignore_errors=True,
         )
+
+
+# ── _get_monitored_repos tests ────────────────────────────────────────────────
+
+
+class TestGetMonitoredRepos:
+    async def test_uses_patrol_repos(self) -> None:
+        """patrol.repos takes priority over agent.repo."""
+        cfg = SaltaXConfig(
+            agent={"name": "test", "description": "test", "repo": "owner/self"},
+            patrol=PatrolConfig(repos=["owner/other1", "owner/other2"]),
+        )
+        scheduler, _ = _make_scheduler(cfg)
+        assert scheduler._get_monitored_repos() == ["owner/other1", "owner/other2"]
+
+    async def test_falls_back_to_agent_repo(self) -> None:
+        """Empty patrol.repos falls back to agent.repo."""
+        cfg = SaltaXConfig(
+            agent={"name": "test", "description": "test", "repo": "owner/self"},
+            patrol=PatrolConfig(repos=[]),
+        )
+        scheduler, _ = _make_scheduler(cfg)
+        assert scheduler._get_monitored_repos() == ["owner/self"]
+
+    async def test_returns_empty_when_nothing_configured(self) -> None:
+        """No patrol.repos and no agent.repo returns empty list."""
+        cfg = SaltaXConfig(
+            agent={"name": "test", "description": "test", "repo": ""},
+            patrol=PatrolConfig(repos=[]),
+        )
+        scheduler, _ = _make_scheduler(cfg)
+        assert scheduler._get_monitored_repos() == []
 
 
 # ── _detect_languages tests (T2) ────────────────────────────────────────────

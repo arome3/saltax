@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import hmac
 from typing import TYPE_CHECKING, Any
@@ -17,6 +19,11 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
 
 INTEGRATION_WEBHOOK_SECRET = "integration-webhook-secret-42"
 
@@ -86,15 +93,9 @@ def issue_webhook_payload(**overrides: Any) -> dict[str, Any]:
 
 
 @pytest.fixture()
-async def real_intel_db(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> IntelligenceDB:
-    """Real ``IntelligenceDB`` on ``tmp_path`` for integration tests."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "integ.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def real_intel_db() -> IntelligenceDB:
+    """Real ``IntelligenceDB`` backed by PostgreSQL for integration tests."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     try:
         await db.initialize()
         yield db  # type: ignore[misc]

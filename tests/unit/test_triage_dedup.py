@@ -22,6 +22,9 @@ from src.triage.dedup import (
 
 _ = pytest  # ensure pytest is used (fixture injection)
 
+# Common test-model tag used when mocking embed_diff return values.
+_TEST_MODEL = "test-model"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # A. cosine_similarity_vectors
@@ -97,147 +100,60 @@ class TestSerialization:
 
 
 class TestEmbedDiff:
-    """Test the embed_diff API wrapper."""
+    """Test embed_diff with fastembed primary + hash fallback."""
 
     async def test_empty_diff_raises(self) -> None:
-        """Empty diff raises ValueError without calling the API."""
+        """Empty diff raises ValueError without embedding."""
         env = AsyncMock()
         config = AsyncMock()
         with pytest.raises(ValueError, match="empty diff"):
             await embed_diff("", env=env, config=config)
 
-    async def test_successful_embedding(self) -> None:
-        """Successful API call returns numpy array."""
-        mock_response = AsyncMock()
-        mock_response.data = [AsyncMock(embedding=[0.1, 0.2, 0.3])]
+    async def test_fastembed_returns_tuple(self) -> None:
+        """When fastembed is available, returns (vector, model_tag) tuple."""
+        fake_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
 
-        mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(return_value=mock_response)
-        mock_client.close = AsyncMock()
-
-        env = AsyncMock()
-        env.eigenai_api_url = "https://fake.api/v1"
-        env.eigenai_api_key = "fake-key"
-
-        config = AsyncMock()
-        config.triage.dedup.embedding_model = "text-embedding"
-        config.triage.dedup.embedding_api_timeout_seconds = 30
-
-        with patch("src.triage.dedup.AsyncOpenAI", return_value=mock_client):
-            result = await embed_diff("diff content", env=env, config=config)
-
-        assert isinstance(result, np.ndarray)
-        assert result.dtype == np.float32
-        assert len(result) == 3
-        mock_client.close.assert_awaited_once()
-
-    async def test_api_failure_still_closes_client(self) -> None:
-        """Client is closed even when the API call raises."""
-        mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(
-            side_effect=RuntimeError("API down"),
-        )
-        mock_client.close = AsyncMock()
-
-        env = AsyncMock()
-        env.eigenai_api_url = "https://fake.api/v1"
-        env.eigenai_api_key = "fake-key"
-        config = AsyncMock()
-        config.triage.dedup.embedding_model = "text-embedding"
-        config.triage.dedup.embedding_api_timeout_seconds = 30
-
-        with (
-            patch("src.triage.dedup.AsyncOpenAI", return_value=mock_client),
-            pytest.raises(RuntimeError, match="API down"),
+        with patch(
+            "src.triage.dedup._fastembed_embed",
+            return_value=fake_vec,
         ):
-            await embed_diff("diff content", env=env, config=config)
+            result = await embed_diff("diff content", env=AsyncMock(), config=AsyncMock())
 
-        mock_client.close.assert_awaited_once()
+        vec, model = result
+        assert isinstance(vec, np.ndarray)
+        assert vec.dtype == np.float32
+        assert model == "bge-small-en-v1.5"
+
+    async def test_hash_fallback_when_fastembed_unavailable(self) -> None:
+        """Falls back to feature-hash when fastembed raises."""
+        with patch(
+            "src.triage.dedup._fastembed_embed",
+            side_effect=RuntimeError("not installed"),
+        ):
+            vec, model = await embed_diff(
+                "def hello(): pass", env=AsyncMock(), config=AsyncMock(),
+            )
+
+        assert isinstance(vec, np.ndarray)
+        assert vec.dtype == np.float32
+        assert model == "local-feature-hash-256"
+        assert len(vec) == 256
 
     async def test_truncation(self) -> None:
-        """Diff longer than 12K chars is truncated before API call."""
+        """Diff longer than 12K chars is truncated before embedding."""
         from src.triage.dedup import _MAX_DIFF_CHARS
 
-        mock_response = AsyncMock()
-        mock_response.data = [AsyncMock(embedding=[0.5])]
+        captured_input: list[str] = []
 
-        mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(return_value=mock_response)
-        mock_client.close = AsyncMock()
-
-        env = AsyncMock()
-        env.eigenai_api_url = "https://fake.api/v1"
-        env.eigenai_api_key = "fake-key"
-        config = AsyncMock()
-        config.triage.dedup.embedding_model = "text-embedding"
-        config.triage.dedup.embedding_api_timeout_seconds = 30
+        def capture_embed(text: str) -> np.ndarray:
+            captured_input.append(text)
+            return np.ones(384, dtype=np.float32)
 
         long_diff = "x" * (_MAX_DIFF_CHARS + 5000)
+        with patch("src.triage.dedup._fastembed_embed", side_effect=capture_embed):
+            await embed_diff(long_diff, env=AsyncMock(), config=AsyncMock())
 
-        with patch("src.triage.dedup.AsyncOpenAI", return_value=mock_client):
-            await embed_diff(long_diff, env=env, config=config)
-
-        call_args = mock_client.embeddings.create.call_args
-        actual_input = call_args.kwargs.get("input") or call_args[1].get("input")
-        assert len(actual_input) == _MAX_DIFF_CHARS
-
-    async def test_retry_on_transient_error(self) -> None:
-        """Embedding API returns 500 then succeeds → retries and returns result."""
-        from openai import InternalServerError
-
-        mock_response = AsyncMock()
-        mock_response.data = [AsyncMock(embedding=[0.1, 0.2])]
-
-        mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(
-            side_effect=[
-                InternalServerError(
-                    "server error",
-                    response=AsyncMock(status_code=500, headers={}),
-                    body=None,
-                ),
-                mock_response,
-            ],
-        )
-        mock_client.close = AsyncMock()
-
-        env = AsyncMock()
-        env.eigenai_api_url = "https://fake.api/v1"
-        env.eigenai_api_key = "fake-key"
-        config = AsyncMock()
-        config.triage.dedup.embedding_model = "text-embedding"
-        config.triage.dedup.embedding_api_timeout_seconds = 30
-
-        with patch("src.triage.dedup.AsyncOpenAI", return_value=mock_client):
-            with patch("src.triage.dedup.asyncio.sleep", new_callable=AsyncMock):
-                result = await embed_diff("diff content", env=env, config=config)
-
-        assert isinstance(result, np.ndarray)
-        assert len(result) == 2
-        assert mock_client.embeddings.create.await_count == 2
-
-    async def test_timeout_raises(self) -> None:
-        """embed_diff raises TimeoutError when timeout budget is exceeded."""
-        mock_client = AsyncMock()
-        mock_client.embeddings.create = AsyncMock(
-            side_effect=TimeoutError("timed out"),
-        )
-        mock_client.close = AsyncMock()
-
-        env = AsyncMock()
-        env.eigenai_api_url = "https://fake.api/v1"
-        env.eigenai_api_key = "fake-key"
-        config = AsyncMock()
-        config.triage.dedup.embedding_model = "text-embedding"
-        config.triage.dedup.embedding_api_timeout_seconds = 30
-
-        with (
-            patch("src.triage.dedup.AsyncOpenAI", return_value=mock_client),
-            pytest.raises(TimeoutError),
-        ):
-            await embed_diff("diff content", env=env, config=config)
-
-        mock_client.close.assert_awaited_once()
+        assert len(captured_input[0]) == _MAX_DIFF_CHARS
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -258,8 +174,7 @@ def _make_config(
     config.triage.enabled = triage_enabled
     config.triage.dedup.enabled = dedup_enabled
     config.triage.dedup.similarity_threshold = threshold
-    config.triage.dedup.embedding_model = "text-embedding"
-    config.triage.dedup.embedding_api_timeout_seconds = 30
+    config.triage.dedup.embedding_model = "bge-small-en-v1.5"
     config.triage.dedup.max_scan_embeddings = max_scan
     config.triage.dedup.comment_on_synchronize = comment_on_synchronize
     return config
@@ -285,7 +200,12 @@ def _make_state(
 
 
 class TestRunDedupCheck:
-    """Test the full dedup check flow."""
+    """Test the full dedup check flow.
+
+    run_dedup_check embeds the diff via embed_diff (returns (vec, model)),
+    stores the embedding, then delegates similarity search to find_similar().
+    Tests mock both embed_diff and find_similar at their import boundaries.
+    """
 
     async def test_disabled_returns_empty(self) -> None:
         """Returns [] when dedup is disabled."""
@@ -335,18 +255,23 @@ class TestRunDedupCheck:
 
         assert result == []
 
-    async def test_no_prior_embeddings(self) -> None:
-        """Returns [] when no prior embeddings exist."""
+    async def test_no_similar_embeddings(self) -> None:
+        """Returns [] when find_similar returns no matches."""
         config = _make_config()
         query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -355,31 +280,28 @@ class TestRunDedupCheck:
         assert result == []
 
     async def test_finds_match_above_threshold(self) -> None:
-        """Detects a duplicate when similarity exceeds threshold."""
+        """Detects a duplicate when find_similar returns a match."""
         config = _make_config(threshold=0.85)
         query_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        # Identical vector → similarity 1.0
-        stored_blob = ndarray_to_blob(query_vec)
 
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[
-            {
-                "pr_id": "owner/repo#10",
-                "pr_number": 10,
-                "commit_sha": "def5678",
-                "embedding": stored_blob,
-            },
-        ])
         intel_db.get_pr_embedding_by_pr_id = AsyncMock(return_value={
             "pr_id": "owner/repo#10",
             "pr_number": 10,
             "commit_sha": "def5678",
         })
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[{"id": "owner/repo#10", "similarity": 1.0}],
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -390,27 +312,23 @@ class TestRunDedupCheck:
         assert result[0]["similarity"] == pytest.approx(1.0)
 
     async def test_filters_below_threshold(self) -> None:
-        """PRs below the similarity threshold are excluded."""
+        """PRs below the similarity threshold are excluded by find_similar."""
         config = _make_config(threshold=0.95)
         query_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        # Somewhat different vector
-        other_vec = np.array([0.7, 0.7, 0.0], dtype=np.float32)
-        stored_blob = ndarray_to_blob(other_vec)
-
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[
-            {
-                "pr_id": "owner/repo#10",
-                "pr_number": 10,
-                "commit_sha": "def5678",
-                "embedding": stored_blob,
-            },
-        ])
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        # find_similar already filters by threshold — returns empty
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -419,29 +337,12 @@ class TestRunDedupCheck:
         assert result == []
 
     async def test_sorted_descending(self) -> None:
-        """Results are sorted by similarity descending."""
+        """Results preserve find_similar's descending similarity order."""
         config = _make_config(threshold=0.50)
         query_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
 
-        high_vec = np.array([0.95, 0.05, 0.0], dtype=np.float32)
-        low_vec = np.array([0.7, 0.7, 0.0], dtype=np.float32)
-
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[
-            {
-                "pr_id": "owner/repo#5",
-                "pr_number": 5,
-                "commit_sha": "aaa",
-                "embedding": ndarray_to_blob(low_vec),
-            },
-            {
-                "pr_id": "owner/repo#6",
-                "pr_number": 6,
-                "commit_sha": "bbb",
-                "embedding": ndarray_to_blob(high_vec),
-            },
-        ])
-        # Enrichment lookup returns metadata keyed by pr_id
+
         async def _pr_lookup(pr_id):
             lookup = {
                 "owner/repo#5": {"pr_id": "owner/repo#5", "pr_number": 5, "commit_sha": "aaa"},
@@ -450,10 +351,21 @@ class TestRunDedupCheck:
             return lookup.get(pr_id)
         intel_db.get_pr_embedding_by_pr_id = AsyncMock(side_effect=_pr_lookup)
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        # find_similar returns results already sorted descending
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[
+                    {"id": "owner/repo#6", "similarity": 0.95},
+                    {"id": "owner/repo#5", "similarity": 0.72},
+                ],
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -463,27 +375,23 @@ class TestRunDedupCheck:
         assert result[0]["pr_number"] == 6  # higher similarity first
         assert result[1]["pr_number"] == 5
 
-    async def test_dimension_mismatch_skipped(self) -> None:
-        """Rows with mismatched dimensions are skipped, not fatal."""
+    async def test_find_similar_exception_returns_empty(self) -> None:
+        """find_similar raising an exception → returns [] gracefully."""
         config = _make_config(threshold=0.50)
         query_vec = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        # Different dimension
-        mismatched = np.array([1.0, 0.0], dtype=np.float32)
-
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[
-            {
-                "pr_id": "owner/repo#10",
-                "pr_number": 10,
-                "commit_sha": "xxx",
-                "embedding": ndarray_to_blob(mismatched),
-            },
-        ])
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("index corrupted"),
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -498,24 +406,23 @@ class TestRunDedupCheck:
 
         intel_db = AsyncMock()
         intel_db.store_embedding = AsyncMock(side_effect=RuntimeError("DB write fail"))
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[
-            {
-                "pr_id": "owner/repo#10",
-                "pr_number": 10,
-                "commit_sha": "def5678",
-                "embedding": ndarray_to_blob(query_vec),
-            },
-        ])
         intel_db.get_pr_embedding_by_pr_id = AsyncMock(return_value={
             "pr_id": "owner/repo#10",
             "pr_number": 10,
             "commit_sha": "def5678",
         })
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[{"id": "owner/repo#10", "similarity": 1.0}],
+            ),
         ):
             result = await run_dedup_check(
                 _make_state(), config, AsyncMock(), intel_db,
@@ -539,41 +446,49 @@ class TestRunDedupCheck:
 
         assert result == []
 
-    async def test_model_filter_passed_to_db(self) -> None:
-        """get_recent_embeddings is called with embedding_model parameter."""
+    async def test_model_tag_passed_to_find_similar(self) -> None:
+        """find_similar is called with embedding_model from embed_diff's return."""
         config = _make_config()
         query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
-
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
-        ):
-            await run_dedup_check(
-                _make_state(), config, AsyncMock(), intel_db,
-            )
-
-        intel_db.get_recent_embeddings.assert_awaited_once()
-        call_kwargs = intel_db.get_recent_embeddings.call_args.kwargs
-        assert call_kwargs["embedding_model"] == "text-embedding"
-        assert call_kwargs["limit"] == 200
-
-    async def test_metrics_emitted(self) -> None:
-        """After successful dedup, _emit_metric is called with expected metric names."""
-        config = _make_config()
-        query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-
-        intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
 
         with (
             patch(
                 "src.triage.dedup.embed_diff",
                 new_callable=AsyncMock,
-                return_value=query_vec,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_find,
+        ):
+            await run_dedup_check(
+                _make_state(), config, AsyncMock(), intel_db,
+            )
+
+        mock_find.assert_awaited_once()
+        call_kwargs = mock_find.call_args.kwargs
+        assert call_kwargs["embedding_model"] == _TEST_MODEL
+        assert call_kwargs["max_scan"] == 200
+
+    async def test_metrics_emitted(self) -> None:
+        """After successful dedup, _emit_metric is called with expected metric names."""
+        config = _make_config()
+        query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
+        intel_db = AsyncMock()
+
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
             ),
             patch("src.triage.dedup._emit_metric") as mock_metric,
         ):
@@ -730,15 +645,21 @@ class TestIssueNumberForwarding:
         query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
 
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
 
         state = _make_state()
         state["target_issue_number"] = 42
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await run_dedup_check(state, config, AsyncMock(), intel_db)
 
@@ -752,15 +673,21 @@ class TestIssueNumberForwarding:
         query_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
 
         intel_db = AsyncMock()
-        intel_db.get_recent_embeddings = AsyncMock(return_value=[])
 
         state = _make_state()
         # No target_issue_number key
 
-        with patch(
-            "src.triage.dedup.embed_diff",
-            new_callable=AsyncMock,
-            return_value=query_vec,
+        with (
+            patch(
+                "src.triage.dedup.embed_diff",
+                new_callable=AsyncMock,
+                return_value=(query_vec, _TEST_MODEL),
+            ),
+            patch(
+                "src.triage.dedup.find_similar",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
         ):
             await run_dedup_check(state, config, AsyncMock(), intel_db)
 

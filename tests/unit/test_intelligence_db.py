@@ -1,9 +1,9 @@
-"""Tests for intelligence database, sealing, similarity, and pattern extraction."""
+"""Tests for intelligence database, similarity, and pattern extraction."""
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -23,16 +23,35 @@ _ = pytest  # ensure pytest is used (fixture injection)
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
+
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB backed by a tmp_path SQLite file."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by a PostgreSQL test database."""
+    db = IntelligenceDB(
+        database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3,
+    )
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 def _make_verdict(decision: str = "approve", score: float = 0.85) -> dict:
@@ -95,36 +114,36 @@ class TestSchemaCreation:
             "backfill_progress",
             "patrol_history", "known_vulnerabilities", "patrol_patches",
         }
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name NOT LIKE 'sqlite_%'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT tablename FROM pg_catalog.pg_tables "
+                "WHERE schemaname = 'public'",
+            )
             rows = await cursor.fetchall()
-            tables = {row[0] for row in rows}
+            tables = {row["tablename"] for row in rows}
         assert expected <= tables
 
     async def test_idempotent_reinit_closes_old_connection(
         self, intel_db: IntelligenceDB,
     ) -> None:
         """Fix #5: Calling initialize() again closes the prior connection."""
-        old_db = intel_db._db
+        old_pool = intel_db.pool
         await intel_db.initialize()
         assert intel_db.initialized is True
-        # The old connection object should no longer be the active one
-        assert intel_db._db is not old_db
+        # The old pool should no longer be the active one
+        assert intel_db.pool is not old_pool
         count = await intel_db.count_patterns()
         assert count == 0
 
     async def test_schema_version_row(self, intel_db: IntelligenceDB) -> None:
         """schema_version table should have exactly one row with current version."""
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT version FROM schema_version WHERE id = 1",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT version FROM schema_version WHERE id = 1",
+            )
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 16
+        assert row["version"] == 16
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -176,12 +195,12 @@ class TestIngestPipelineResults:
             ai_findings=[],
             verdict=_make_verdict(),
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM pipeline_history",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM pipeline_history",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 1
+        assert row["count"] == 1
 
     async def test_upserts_contributor_profile(
         self, intel_db: IntelligenceDB,
@@ -194,16 +213,16 @@ class TestIngestPipelineResults:
             verdict=_make_verdict(decision="approve"),
             author="dev-alice",
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT total_submissions, approved_submissions "
-            "FROM contributor_profiles WHERE github_login = ?",
-            ("dev-alice",),
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT total_submissions, approved_submissions "
+                "FROM contributor_profiles WHERE github_login = %s",
+                ("dev-alice",),
+            )
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 1  # total
-        assert row[1] == 1  # approved
+        assert row["total_submissions"] == 1  # total
+        assert row["approved_submissions"] == 1  # approved
 
     async def test_increments_times_seen(self, intel_db: IntelligenceDB) -> None:
         findings = _make_static_findings()[:1]  # just sql-injection
@@ -215,14 +234,14 @@ class TestIngestPipelineResults:
                 ai_findings=[],
                 verdict=_make_verdict(),
             )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT times_seen FROM vulnerability_patterns",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT times_seen FROM vulnerability_patterns",
+            )
             row = await cursor.fetchone()
         assert row is not None
         # 3 calls: INSERT(times_seen=1), UPDATE(+1=2), UPDATE(+1=3)
-        assert row[0] == 3
+        assert row["times_seen"] == 3
 
     async def test_handles_empty_findings(self, intel_db: IntelligenceDB) -> None:
         await intel_db.ingest_pipeline_results(
@@ -251,18 +270,17 @@ class TestGetFalsePositiveSignatures:
 
     async def test_returns_high_fp_rules(self, intel_db: IntelligenceDB) -> None:
         """Patterns with >80% FP rate should return rule_id (not internal id)."""
-        db = intel_db._require_db()
-        await db.execute(
-            """\
-            INSERT INTO vulnerability_patterns
-                (id, rule_id, severity, category, normalized_pattern,
-                 pattern_signature, confidence, times_seen, first_seen, last_seen,
-                 source_stage, confirmed_true_positive, confirmed_false_positive)
-            VALUES ('fp1', 'noisy-rule', 'LOW', 'lint', 'pattern', 'sig1',
-                    0.5, 10, '2024-01-01', '2024-01-01', 'static_scanner', 1, 9)
-            """,
-        )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('fp1', 'noisy-rule', 'LOW', 'lint', 'pattern', 'sig1',
+                        0.5, 10, '2024-01-01', '2024-01-01', 'static_scanner', 1, 9)
+                """,
+            )
 
         result = await intel_db.get_false_positive_signatures()
         # Should return rule_id, not internal UUID
@@ -271,18 +289,17 @@ class TestGetFalsePositiveSignatures:
 
     async def test_excludes_low_fp_rules(self, intel_db: IntelligenceDB) -> None:
         """Patterns with <=80% FP rate should NOT be returned."""
-        db = intel_db._require_db()
-        await db.execute(
-            """\
-            INSERT INTO vulnerability_patterns
-                (id, rule_id, severity, category, normalized_pattern,
-                 pattern_signature, confidence, times_seen, first_seen, last_seen,
-                 source_stage, confirmed_true_positive, confirmed_false_positive)
-            VALUES ('good1', 'good-rule', 'HIGH', 'security', 'pattern', 'sig2',
-                    0.9, 10, '2024-01-01', '2024-01-01', 'static_scanner', 8, 2)
-            """,
-        )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('good1', 'good-rule', 'HIGH', 'security', 'pattern', 'sig2',
+                        0.9, 10, '2024-01-01', '2024-01-01', 'static_scanner', 8, 2)
+                """,
+            )
 
         result = await intel_db.get_false_positive_signatures()
         assert "good-rule" not in result
@@ -349,21 +366,20 @@ class TestGetContributorAcceptanceRate:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """Fix #10: fallback LIKE only matches "decision": "approve"."""
-        db = intel_db._require_db()
-        # Insert history rows directly (bypass contributor_profiles)
-        for i in range(5):
-            decision = "approve" if i < 3 else "reject"
-            verdict = f'{{"decision": "{decision}", "composite_score": 0.5}}'
-            await db.execute(
-                """\
-                INSERT INTO pipeline_history
-                    (id, pr_id, repo, pr_author, verdict,
-                     composite_score, findings_count, created_at)
-                VALUES (?, ?, 'owner/repo', 'fallback-dev', ?, 0.5, 0, '2024-01-01')
-                """,
-                (f"h{i}", f"pr#{i}", verdict),
-            )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            # Insert history rows directly (bypass contributor_profiles)
+            for i in range(5):
+                decision = "approve" if i < 3 else "reject"
+                verdict = f'{{"decision": "{decision}", "composite_score": 0.5}}'
+                await conn.execute(
+                    """\
+                    INSERT INTO pipeline_history
+                        (id, pr_id, repo, pr_author, verdict,
+                         composite_score, findings_count, created_at)
+                    VALUES (%s, %s, 'owner/repo', 'fallback-dev', %s, 0.5, 0, '2024-01-01')
+                    """,
+                    (f"h{i}", f"pr#{i}", verdict),
+                )
 
         result = await intel_db.get_contributor_acceptance_rate(
             "owner/repo", "fallback-dev",
@@ -458,43 +474,25 @@ class TestGetStats:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# H. Seal lifecycle
+# H. Close lifecycle
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-class TestSealLifecycle:
-    """Test seal/close operations."""
-
-    async def test_seal_calls_kms_and_cleans_plaintext(
-        self, intel_db: IntelligenceDB, tmp_path,
-    ) -> None:
-        """After seal, plaintext DB file is removed."""
-        import src.intelligence.database as db_mod
-
-        # Access the monkeypatched path via the module attribute (not import)
-        test_db_path = db_mod.DB_PATH
-        assert test_db_path.exists(), "DB file should exist before seal"
-
-        kms = AsyncMock()
-        kms.seal = AsyncMock()
-        await intel_db.seal(kms)
-        kms.seal.assert_awaited_once()
-        assert intel_db.initialized is False
-        assert not test_db_path.exists()
-
-    async def test_seal_kms_failure_still_uninitializes(
-        self, intel_db: IntelligenceDB,
-    ) -> None:
-        """Fix #4: Even if KMS seal fails, DB is marked uninitialized."""
-        kms = AsyncMock()
-        kms.seal = AsyncMock(side_effect=RuntimeError("KMS down"))
-        await intel_db.seal(kms)
-        assert intel_db.initialized is False
+class TestCloseLifecycle:
+    """Test close operations."""
 
     async def test_close_sets_uninitialized(
         self, intel_db: IntelligenceDB,
     ) -> None:
         assert intel_db.initialized is True
+        await intel_db.close()
+        assert intel_db.initialized is False
+
+    async def test_close_is_idempotent(
+        self, intel_db: IntelligenceDB,
+    ) -> None:
+        """Calling close() twice should not raise."""
+        await intel_db.close()
         await intel_db.close()
         assert intel_db.initialized is False
 
@@ -623,12 +621,12 @@ class TestEmbeddings:
             commit_sha="abc123",
             embedding_blob=emb,
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM pr_embeddings",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM pr_embeddings",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 1
+        assert row["count"] == 1
 
     async def test_find_similar_above_threshold(
         self, intel_db: IntelligenceDB,
@@ -677,12 +675,12 @@ class TestEmbeddings:
             pr_id="owner/repo#1", repo="owner/repo", issue_number=42,
         )
         assert updated == 1
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 42
+        assert row["issue_number"] == 42
 
     async def test_backfill_skips_non_null(
         self, intel_db: IntelligenceDB,
@@ -701,12 +699,12 @@ class TestEmbeddings:
             pr_id="owner/repo#1", repo="owner/repo", issue_number=42,
         )
         assert updated == 0
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 99  # unchanged
+        assert row["issue_number"] == 99  # unchanged
 
     async def test_backfill_no_match_returns_zero(
         self, intel_db: IntelligenceDB,
@@ -730,12 +728,12 @@ class TestEmbeddings:
             commit_sha="abc123",
             embedding_blob=emb,
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] is None
+        assert row["issue_number"] is None
 
         # Second store — same pr_id + commit_sha → same deterministic id
         await intel_db.store_embedding(
@@ -746,11 +744,12 @@ class TestEmbeddings:
             embedding_blob=emb,
             issue_number=42,
         )
-        async with db.execute(
-            "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT issue_number FROM pr_embeddings WHERE pr_id = 'owner/repo#1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 42
+        assert row["issue_number"] == 42
 
     async def test_mismatched_embedding_sizes_skipped(
         self, intel_db: IntelligenceDB,
@@ -777,22 +776,20 @@ class TestEmbeddings:
 class TestRequireDB:
     """Fix #3: Methods raise RuntimeError when DB is not initialized."""
 
-    async def test_count_patterns_raises_before_init(self, tmp_path, monkeypatch) -> None:
-        monkeypatch.setattr(
-            "src.intelligence.database.DB_PATH", tmp_path / "test.db",
+    async def test_count_patterns_raises_before_init(self) -> None:
+        db = IntelligenceDB(
+            database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3,
         )
-        kms = AsyncMock()
-        db = IntelligenceDB(kms=kms)
         # Do NOT call initialize()
         with pytest.raises(RuntimeError, match="not initialized"):
             await db.count_patterns()
 
-    async def test_require_db_returns_connection(
+    async def test_pool_available_after_init(
         self, intel_db: IntelligenceDB,
     ) -> None:
-        """After initialize(), _require_db returns a live connection."""
-        conn = intel_db._require_db()
-        assert conn is not None
+        """After initialize(), pool property returns a connection pool."""
+        pool = intel_db.pool
+        assert pool is not None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -811,23 +808,24 @@ class TestVerdictFeedback:
             ai_findings=[],
             verdict=_make_verdict(),
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT id FROM vulnerability_patterns LIMIT 1",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id FROM vulnerability_patterns LIMIT 1",
+            )
             row = await cursor.fetchone()
-        pat_id = row[0]
+        pat_id = row["id"]
 
         await intel_db.record_verdict_feedback(pat_id, is_true_positive=True)
 
-        async with db.execute(
-            "SELECT confirmed_true_positive, confirmed_false_positive "
-            "FROM vulnerability_patterns WHERE id = ?",
-            (pat_id,),
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT confirmed_true_positive, confirmed_false_positive "
+                "FROM vulnerability_patterns WHERE id = %s",
+                (pat_id,),
+            )
             row = await cursor.fetchone()
-        assert row[0] == 1  # TP incremented
-        assert row[1] == 0  # FP unchanged
+        assert row["confirmed_true_positive"] == 1  # TP incremented
+        assert row["confirmed_false_positive"] == 0  # FP unchanged
 
     async def test_record_false_positive(self, intel_db: IntelligenceDB) -> None:
         await intel_db.ingest_pipeline_results(
@@ -837,23 +835,24 @@ class TestVerdictFeedback:
             ai_findings=[],
             verdict=_make_verdict(),
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT id FROM vulnerability_patterns LIMIT 1",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id FROM vulnerability_patterns LIMIT 1",
+            )
             row = await cursor.fetchone()
-        pat_id = row[0]
+        pat_id = row["id"]
 
         await intel_db.record_verdict_feedback(pat_id, is_true_positive=False)
 
-        async with db.execute(
-            "SELECT confirmed_true_positive, confirmed_false_positive "
-            "FROM vulnerability_patterns WHERE id = ?",
-            (pat_id,),
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT confirmed_true_positive, confirmed_false_positive "
+                "FROM vulnerability_patterns WHERE id = %s",
+                (pat_id,),
+            )
             row = await cursor.fetchone()
-        assert row[0] == 0  # TP unchanged
-        assert row[1] == 1  # FP incremented
+        assert row["confirmed_true_positive"] == 0  # TP unchanged
+        assert row["confirmed_false_positive"] == 1  # FP incremented
 
     async def test_fp_feedback_surfaces_in_signatures(
         self, intel_db: IntelligenceDB,
@@ -866,13 +865,13 @@ class TestVerdictFeedback:
             ai_findings=[],
             verdict=_make_verdict(),
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT id, rule_id FROM vulnerability_patterns LIMIT 1",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT id, rule_id FROM vulnerability_patterns LIMIT 1",
+            )
             row = await cursor.fetchone()
-        pat_id = row[0]
-        rule_id = row[1]
+        pat_id = row["id"]
+        rule_id = row["rule_id"]
 
         # 9 FP, 1 TP → 90% FP rate → above 80% threshold
         for _ in range(9):
@@ -933,12 +932,12 @@ class TestGhostTableWritePaths:
             opens_at="2024-01-01T00:00:00",
             closes_at="2024-01-02T00:00:00",
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM verification_windows",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM verification_windows",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 1
+        assert row["count"] == 1
 
     async def test_transition_window_status(
         self, intel_db: IntelligenceDB,
@@ -976,12 +975,12 @@ class TestGhostTableWritePaths:
             file_path="src/main.py",
             knowledge="Entry point for the application",
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT knowledge FROM codebase_knowledge WHERE id = 'ck1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT knowledge FROM codebase_knowledge WHERE id = 'ck1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == "Entry point for the application"
+        assert row["knowledge"] == "Entry point for the application"
 
     async def test_store_vision_document(
         self, intel_db: IntelligenceDB,
@@ -991,12 +990,12 @@ class TestGhostTableWritePaths:
             repo="owner/repo",
             content="The project aims to...",
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT content FROM vision_documents WHERE id = 'vd1'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT content FROM vision_documents WHERE id = 'vd1'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == "The project aims to..."
+        assert row["content"] == "The project aims to..."
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1009,22 +1008,20 @@ class TestPurgeStaleVisionDocuments:
 
     async def test_purges_old_documents(self, intel_db: IntelligenceDB) -> None:
         """Documents older than max_age_days are deleted, fresh ones kept."""
-        db = intel_db._require_db()
         old_time = (datetime.now(UTC) - timedelta(days=100)).isoformat()
         fresh_time = datetime.now(UTC).isoformat()
 
-        async with intel_db._write_lock:
-            await db.execute(
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
                 "INSERT INTO vision_documents (id, repo, content, embedding, updated_at) "
-                "VALUES (?, ?, ?, NULL, ?)",
+                "VALUES (%s, %s, %s, NULL, %s)",
                 ("old1", "owner/old-repo", "Old vision.", old_time),
             )
-            await db.execute(
+            await conn.execute(
                 "INSERT INTO vision_documents (id, repo, content, embedding, updated_at) "
-                "VALUES (?, ?, ?, NULL, ?)",
+                "VALUES (%s, %s, %s, NULL, %s)",
                 ("fresh1", "owner/fresh-repo", "Fresh vision.", fresh_time),
             )
-            await db.commit()
 
         deleted = await intel_db.purge_stale_vision_documents(max_age_days=90)
         assert deleted == 1
@@ -1181,8 +1178,8 @@ class TestVisionScoreTrending:
         )
         trend = await intel_db.get_vision_score_trend("org/repo")
         assert len(trend) == 1
-        stored_goals = json.loads(trend[0]["goal_scores_json"])
-        assert stored_goals == goals
+        # JSONB columns are auto-deserialized to dicts by psycopg3
+        assert trend[0]["goal_scores_json"] == goals
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1284,11 +1281,11 @@ class TestIssueEmbeddings:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """issue_embeddings table should be present after init."""
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name='issue_embeddings'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT tablename FROM pg_catalog.pg_tables "
+                "WHERE schemaname = 'public' AND tablename = 'issue_embeddings'",
+            )
             row = await cursor.fetchone()
         assert row is not None
 
@@ -1346,12 +1343,12 @@ class TestIssueEmbeddings:
         assert result["updated_at"] >= original_created
 
         # Only one row should exist
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM issue_embeddings WHERE repo = 'owner/repo'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM issue_embeddings WHERE repo = 'owner/repo'",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 1
+        assert row["count"] == 1
 
     async def test_get_recent_excludes_current(
         self, intel_db: IntelligenceDB,
@@ -1422,13 +1419,13 @@ class TestIssueEmbeddings:
 
     async def test_schema_version_15(self, intel_db: IntelligenceDB) -> None:
         """Schema version should be 15 after initialization."""
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT version FROM schema_version WHERE id = 1",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT version FROM schema_version WHERE id = 1",
+            )
             row = await cursor.fetchone()
         assert row is not None
-        assert row[0] == 16
+        assert row["version"] == 16
 
 
 # ── V. Patrol CRUD ───────────────────────────────────────────────────────────
@@ -1610,12 +1607,11 @@ class TestPatrolCRUD:
             new_version="2.31.0",
             status="submitted",
         )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT * FROM patrol_patches WHERE id = ?", ("p-001",),
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT * FROM patrol_patches WHERE id = %s", ("p-001",),
+            )
             row = await cursor.fetchone()
         assert row is not None
-        result = dict(row)
-        assert result["pr_number"] == 99
-        assert result["package_name"] == "requests"
+        assert row["pr_number"] == 99
+        assert row["package_name"] == "requests"

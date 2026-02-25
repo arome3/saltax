@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -24,20 +26,36 @@ from src.triage.vision import (
 
 _ = pytest  # ensure pytest is used (fixture injection)
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB backed by a tmp_path SQLite file."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by PostgreSQL."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 def _vision_config(**overrides) -> VisionConfig:
@@ -196,15 +214,15 @@ class TestLoadVisionDocument:
         stale_time = (
             datetime.now(UTC) - timedelta(hours=_CACHE_MAX_AGE_HOURS + 1)
         ).isoformat()
-        db = intel_db._require_db()
-        async with intel_db._write_lock:
-            await db.execute(
-                "INSERT OR REPLACE INTO vision_documents "
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO vision_documents "
                 "(id, repo, doc_type, content, embedding, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, "
+                "updated_at = EXCLUDED.updated_at",
                 ("vision:owner/repo:vision", "owner/repo", "vision", "Old vision.", None, stale_time),
             )
-            await db.commit()
 
         config = _make_config(
             triage={"enabled": True, "vision": {"enabled": True, "source": "repo"}},
@@ -226,15 +244,15 @@ class TestLoadVisionDocument:
         stale_time = (
             datetime.now(UTC) - timedelta(hours=_CACHE_MAX_AGE_HOURS + 1)
         ).isoformat()
-        db = intel_db._require_db()
-        async with intel_db._write_lock:
-            await db.execute(
-                "INSERT OR REPLACE INTO vision_documents "
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO vision_documents "
                 "(id, repo, doc_type, content, embedding, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, "
+                "updated_at = EXCLUDED.updated_at",
                 ("vision:owner/repo:vision", "owner/repo", "vision", "API vision.", None, stale_time),
             )
-            await db.commit()
 
         config = _make_config(
             triage={"enabled": True, "vision": {"enabled": True, "source": "api"}},
@@ -315,15 +333,15 @@ class TestLoadVisionDocument:
         stale_time = (
             datetime.now(UTC) - timedelta(hours=_CACHE_MAX_AGE_HOURS + 1)
         ).isoformat()
-        db = intel_db._require_db()
-        async with intel_db._write_lock:
-            await db.execute(
-                "INSERT OR REPLACE INTO vision_documents "
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO vision_documents "
                 "(id, repo, doc_type, content, embedding, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, "
+                "updated_at = EXCLUDED.updated_at",
                 ("vision:owner/repo:vision", "owner/repo", "vision", "Stale vision.", None, stale_time),
             )
-            await db.commit()
 
         config = _make_config(
             triage={"enabled": True, "vision": {"enabled": True, "source": "api"}},
@@ -652,7 +670,7 @@ class TestVisionEmbeddings:
         from src.intelligence.similarity import ndarray_to_blob
 
         fake_vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-        mock_embed = AsyncMock(return_value=fake_vec)
+        mock_embed = AsyncMock(return_value=(fake_vec, "test-model"))
 
         env = MagicMock()
         config = _make_config()

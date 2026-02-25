@@ -4,6 +4,8 @@ upgrade logging, concurrency, handler integration, and scheduler orchestration.
 
 from __future__ import annotations
 
+import os
+
 import asyncio
 import json
 import textwrap
@@ -592,22 +594,37 @@ class TestHandlerIntegration:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
+
 class TestSchedulerSelfMerge:
     """Verify the scheduler's self-merge orchestration cycle."""
 
     @pytest.fixture()
-    async def intel_db(self, tmp_path, monkeypatch):
+    async def intel_db(self):
         from src.intelligence.database import IntelligenceDB
 
-        monkeypatch.setattr(
-            "src.intelligence.database.DB_PATH", tmp_path / "test.db",
-        )
-        kms = AsyncMock()
-        kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-        db = IntelligenceDB(kms=kms)
+        db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
         await db.initialize()
-        yield db
-        await db.close()
+        try:
+            yield db
+        finally:
+            try:
+                pool = db.pool
+                async with pool.connection() as conn:
+                    tables = await (
+                        await conn.execute(
+                            "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                        )
+                    ).fetchall()
+                    for t in tables:
+                        await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+            except Exception:
+                pass
+            await db.close()
 
     async def _store_window(
         self, intel_db, *, is_self_mod: bool = False, window_id: str = "win-sm",

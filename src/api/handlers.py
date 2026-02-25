@@ -23,6 +23,58 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+async def _resolve_bounty_from_linked_issue(
+    *,
+    pr_data: dict[str, Any],
+    config: SaltaXConfig,
+    github_client: GitHubClient,
+    installation_id: int,
+    repo: str,
+) -> int | None:
+    """Resolve bounty amount from the linked issue's labels.
+
+    Parses ``Closes #N`` / ``Fixes #N`` from the PR body/title/branch,
+    fetches the issue, and checks its labels for bounty labels.
+
+    Returns ``None`` if no linked issue or no bounty label found.
+    This is best-effort — API errors return ``None`` silently.
+    """
+    try:
+        from src.triage.issue_linker import extract_target_issue  # noqa: PLC0415
+
+        issue_number = extract_target_issue(
+            title=pr_data.get("title", ""),
+            body=pr_data.get("body"),
+            head_branch=pr_data.get("head_branch", ""),
+        )
+        if issue_number is None:
+            return None
+
+        issue = await github_client.get_issue(repo, issue_number, installation_id)
+        for label_obj in issue.get("labels", []):
+            label_name = label_obj.get("name", "") if isinstance(label_obj, dict) else str(label_obj)
+            if label_name.startswith("bounty-"):
+                eth_amount = config.bounties.labels.get(label_name)
+                if eth_amount is not None:
+                    logger.info(
+                        "Bounty resolved from linked issue",
+                        extra={
+                            "pr_id": pr_data.get("pr_id"),
+                            "issue_number": issue_number,
+                            "bounty_label": label_name,
+                            "bounty_eth": eth_amount,
+                        },
+                    )
+                    return int(eth_amount * 10**18)
+    except Exception:
+        logger.warning(
+            "Failed to resolve bounty from linked issue, continuing without bounty",
+            exc_info=True,
+            extra={"pr_id": pr_data.get("pr_id")},
+        )
+    return None
+
+
 async def handle_pr_event(
     pr_data: dict[str, Any],
     *,
@@ -60,7 +112,7 @@ async def handle_pr_event(
         author_login = pr_data["author_login"]
         contributor_wallet = await intel_db.get_contributor_wallet(author_login)
 
-        # Compute bounty from PR labels
+        # Compute bounty from PR labels (preferred) or linked issue labels
         bounty_amount_wei: int | None = None
         for label in pr_data.get("labels", []):
             if label.startswith("bounty-"):
@@ -68,6 +120,16 @@ async def handle_pr_event(
                 if eth_amount is not None:
                     bounty_amount_wei = int(eth_amount * 10**18)
                     break  # first matching label wins
+
+        # Fallback: resolve bounty from the linked issue's labels
+        if bounty_amount_wei is None:
+            bounty_amount_wei = await _resolve_bounty_from_linked_issue(
+                pr_data=pr_data,
+                config=config,
+                github_client=github_client,
+                installation_id=installation_id,
+                repo=repo,
+            )
 
         # Fetch the diff via the GitHub client and sanitize at ingress
         diff = await github_client.get_pr_diff(repo, pr_number, installation_id)
@@ -284,7 +346,7 @@ async def handle_pr_event(
                     attestation=attestation,
                     contributor_address=state.pr_author_wallet,
                     bounty_amount_wei=state.bounty_amount_wei,
-                    stake_amount_wei=state.bounty_amount_wei,
+                    stake_amount_wei=None,
                     is_self_modification=state.is_self_modification,
                 )
             except Exception:

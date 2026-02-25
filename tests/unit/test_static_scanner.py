@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import asyncio
 import json
 from pathlib import Path
@@ -26,6 +28,11 @@ from src.pipeline.stages.static_scanner import (
 from src.security import validate_branch_name, validate_clone_url
 from tests.unit.conftest import make_pipeline_state as _make_state
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.static_scanner"
@@ -36,8 +43,7 @@ def _make_config() -> SaltaXConfig:
 
 
 def _make_intel_db() -> IntelligenceDB:
-    kms = MagicMock()
-    return IntelligenceDB(kms)
+    return IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
 
 
 def _make_semgrep_result(

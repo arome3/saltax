@@ -2,6 +2,13 @@ version: "1.0"
 agent:
   name: "SaltaX"
   description: "Sovereign Code Organism"
+  repo: "arome3/saltax"
+
+database:
+  pool_min_size: 2
+  pool_max_size: 10
+  pool_timeout: 30.0
+  statement_timeout_ms: 30000
 
 pipeline:
   approval_threshold: 0.75
@@ -84,8 +91,9 @@ triage:
     label_recommends_reject: "saltax-recommends-reject"
 
 patrol:
-  enabled: false
-  interval_seconds: 21600
+  enabled: true
+  repos: ["arome3/sentinel-triage"]
+  interval_seconds: 120
   max_concurrent_repos: 3
   dependency_audit:
     enabled: true

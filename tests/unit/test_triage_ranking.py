@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -15,20 +17,36 @@ from src.triage.ranking import post_ranking_update
 
 _ = pytest  # ensure pytest is used (fixture injection)
 
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
+
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture()
-async def intel_db(tmp_path, monkeypatch):
-    """Provide a fresh IntelligenceDB backed by a tmp_path SQLite file."""
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+async def intel_db():
+    """Provide a fresh IntelligenceDB backed by PostgreSQL."""
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     await db.initialize()
-    yield db
-    await db.close()
+    try:
+        yield db
+    finally:
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
+        await db.close()
 
 
 def _ranking_config(**overrides) -> RankingConfig:
@@ -583,16 +601,16 @@ class TestPostRankingUpdate:
 
 
 class TestRankingDBMethods:
-    """Test DB methods with real SQLite — verifies SQL correctness."""
+    """Test DB methods with real PostgreSQL — verifies SQL correctness."""
 
     async def test_ranking_updates_table_exists(
         self, intel_db: IntelligenceDB,
     ) -> None:
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master "
-            "WHERE type='table' AND name = 'ranking_updates'",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT tablename FROM pg_catalog.pg_tables "
+                "WHERE schemaname = 'public' AND tablename = 'ranking_updates'",
+            )
             row = await cursor.fetchone()
         assert row is not None
 
@@ -620,15 +638,14 @@ class TestRankingDBMethods:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """Manually insert an old record and verify it's not considered recent."""
-        db = intel_db._require_db()
         old_time = (datetime.now(UTC) - timedelta(seconds=7200)).isoformat()
-        await db.execute(
-            "INSERT INTO ranking_updates "
-            "(id, repo, issue_number, updated_at, ranking_json) "
-            "VALUES ('old1', 'owner/repo', 42, ?, '[]')",
-            (old_time,),
-        )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO ranking_updates "
+                "(id, repo, issue_number, updated_at, ranking_json) "
+                "VALUES ('old1', 'owner/repo', 42, %s, '[]')",
+                (old_time,),
+            )
 
         result = await intel_db.was_ranking_recently_posted(
             "owner/repo", 42, 3600,
@@ -639,37 +656,35 @@ class TestRankingDBMethods:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """PRs should be ranked by composite_score DESC, pr_number ASC."""
-        db = intel_db._require_db()
         now = datetime.now(UTC).isoformat()
+        async with intel_db.pool.connection() as conn:
+            # Insert embeddings linked to issue 42
+            for pr_num, pr_id in [(10, "owner/repo#10"), (20, "owner/repo#20")]:
+                await conn.execute(
+                    "INSERT INTO pr_embeddings "
+                    "(id, pr_id, repo, pr_number, commit_sha, embedding, "
+                    "issue_number, created_at) "
+                    "VALUES (%s, %s, 'owner/repo', %s, 'sha', %s, 42, %s)",
+                    (f"emb-{pr_num}", pr_id, pr_num, b"\x01", now),
+                )
 
-        # Insert embeddings linked to issue 42
-        for pr_num, pr_id in [(10, "owner/repo#10"), (20, "owner/repo#20")]:
-            await db.execute(
-                "INSERT INTO pr_embeddings "
-                "(id, pr_id, repo, pr_number, commit_sha, embedding, "
-                "issue_number, created_at) "
-                "VALUES (?, ?, 'owner/repo', ?, 'sha', X'00', 42, ?)",
-                (f"emb-{pr_num}", pr_id, pr_num, now),
+            # Insert pipeline history — PR #20 has higher score
+            await conn.execute(
+                "INSERT INTO pipeline_history "
+                "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                "findings_count, created_at) "
+                "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
+                "'{\"decision\": \"REVIEW\"}', 0.70, 0, %s)",
+                (now,),
             )
-
-        # Insert pipeline history — PR #20 has higher score
-        await db.execute(
-            "INSERT INTO pipeline_history "
-            "(id, pr_id, repo, pr_author, verdict, composite_score, "
-            "findings_count, created_at) "
-            "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
-            "'{\"decision\": \"REVIEW\"}', 0.70, 0, ?)",
-            (now,),
-        )
-        await db.execute(
-            "INSERT INTO pipeline_history "
-            "(id, pr_id, repo, pr_author, verdict, composite_score, "
-            "findings_count, created_at) "
-            "VALUES ('h2', 'owner/repo#20', 'owner/repo', 'bob', "
-            "'{\"decision\": \"APPROVE\"}', 0.90, 0, ?)",
-            (now,),
-        )
-        await db.commit()
+            await conn.execute(
+                "INSERT INTO pipeline_history "
+                "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                "findings_count, created_at) "
+                "VALUES ('h2', 'owner/repo#20', 'owner/repo', 'bob', "
+                "'{\"decision\": \"APPROVE\"}', 0.90, 0, %s)",
+                (now,),
+            )
 
         ranking = await intel_db.get_ranked_prs("owner/repo", 42)
         assert len(ranking) == 2
@@ -682,38 +697,36 @@ class TestRankingDBMethods:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """When a PR has multiple pipeline runs, only the latest is used."""
-        db = intel_db._require_db()
         now = datetime.now(UTC).isoformat()
         later = (datetime.now(UTC) + timedelta(seconds=10)).isoformat()
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO pr_embeddings "
+                "(id, pr_id, repo, pr_number, commit_sha, embedding, "
+                "issue_number, created_at) "
+                "VALUES ('emb-1', 'owner/repo#10', 'owner/repo', 10, 'sha', "
+                "%s, 42, %s)",
+                (b"\x01", now),
+            )
 
-        await db.execute(
-            "INSERT INTO pr_embeddings "
-            "(id, pr_id, repo, pr_number, commit_sha, embedding, "
-            "issue_number, created_at) "
-            "VALUES ('emb-1', 'owner/repo#10', 'owner/repo', 10, 'sha', "
-            "X'00', 42, ?)",
-            (now,),
-        )
-
-        # First run: low score
-        await db.execute(
-            "INSERT INTO pipeline_history "
-            "(id, pr_id, repo, pr_author, verdict, composite_score, "
-            "findings_count, created_at) "
-            "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
-            "'{\"decision\": \"REVIEW\"}', 0.50, 0, ?)",
-            (now,),
-        )
-        # Second run: high score (later timestamp)
-        await db.execute(
-            "INSERT INTO pipeline_history "
-            "(id, pr_id, repo, pr_author, verdict, composite_score, "
-            "findings_count, created_at) "
-            "VALUES ('h2', 'owner/repo#10', 'owner/repo', 'alice', "
-            "'{\"decision\": \"APPROVE\"}', 0.95, 0, ?)",
-            (later,),
-        )
-        await db.commit()
+            # First run: low score
+            await conn.execute(
+                "INSERT INTO pipeline_history "
+                "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                "findings_count, created_at) "
+                "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
+                "'{\"decision\": \"REVIEW\"}', 0.50, 0, %s)",
+                (now,),
+            )
+            # Second run: high score (later timestamp)
+            await conn.execute(
+                "INSERT INTO pipeline_history "
+                "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                "findings_count, created_at) "
+                "VALUES ('h2', 'owner/repo#10', 'owner/repo', 'alice', "
+                "'{\"decision\": \"APPROVE\"}', 0.95, 0, %s)",
+                (later,),
+            )
 
         ranking = await intel_db.get_ranked_prs("owner/repo", 42)
         assert len(ranking) == 1
@@ -724,26 +737,24 @@ class TestRankingDBMethods:
         self, intel_db: IntelligenceDB,
     ) -> None:
         """PRs with NULL composite_score should not appear in ranking."""
-        db = intel_db._require_db()
         now = datetime.now(UTC).isoformat()
-
-        await db.execute(
-            "INSERT INTO pr_embeddings "
-            "(id, pr_id, repo, pr_number, commit_sha, embedding, "
-            "issue_number, created_at) "
-            "VALUES ('emb-1', 'owner/repo#10', 'owner/repo', 10, 'sha', "
-            "X'00', 42, ?)",
-            (now,),
-        )
-        await db.execute(
-            "INSERT INTO pipeline_history "
-            "(id, pr_id, repo, pr_author, verdict, composite_score, "
-            "findings_count, created_at) "
-            "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
-            "'{}', NULL, 0, ?)",
-            (now,),
-        )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO pr_embeddings "
+                "(id, pr_id, repo, pr_number, commit_sha, embedding, "
+                "issue_number, created_at) "
+                "VALUES ('emb-1', 'owner/repo#10', 'owner/repo', 10, 'sha', "
+                "%s, 42, %s)",
+                (b"\x01", now),
+            )
+            await conn.execute(
+                "INSERT INTO pipeline_history "
+                "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                "findings_count, created_at) "
+                "VALUES ('h1', 'owner/repo#10', 'owner/repo', 'alice', "
+                "'{}', NULL, 0, %s)",
+                (now,),
+            )
 
         ranking = await intel_db.get_ranked_prs("owner/repo", 42)
         assert len(ranking) == 0
@@ -756,13 +767,13 @@ class TestRankingDBMethods:
             await intel_db.record_ranking_update(
                 "owner/repo", 42, f'[{{"run": {i}}}]',
             )
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM ranking_updates "
-            "WHERE repo = 'owner/repo' AND issue_number = 42",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM ranking_updates "
+                "WHERE repo = 'owner/repo' AND issue_number = 42",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 5
+        assert row["count"] == 5
 
     async def test_prune_does_not_affect_other_issues(
         self, intel_db: IntelligenceDB,
@@ -773,45 +784,44 @@ class TestRankingDBMethods:
         for _ in range(3):
             await intel_db.record_ranking_update("owner/repo", 99, "[]")
 
-        db = intel_db._require_db()
-        async with db.execute(
-            "SELECT COUNT(*) FROM ranking_updates "
-            "WHERE repo = 'owner/repo' AND issue_number = 42",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM ranking_updates "
+                "WHERE repo = 'owner/repo' AND issue_number = 42",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 5
+        assert row["count"] == 5
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM ranking_updates "
-            "WHERE repo = 'owner/repo' AND issue_number = 99",
-        ) as cursor:
+        async with intel_db.pool.connection() as conn:
+            cursor = await conn.execute(
+                "SELECT COUNT(*) FROM ranking_updates "
+                "WHERE repo = 'owner/repo' AND issue_number = 99",
+            )
             row = await cursor.fetchone()
-        assert row[0] == 3  # untouched
+        assert row["count"] == 3  # untouched
 
     async def test_tiebreaker_by_pr_number(
         self, intel_db: IntelligenceDB,
     ) -> None:
         """PRs with same score should be ordered by pr_number ASC."""
-        db = intel_db._require_db()
         now = datetime.now(UTC).isoformat()
-
-        for pr_num in [30, 10, 20]:
-            pr_id = f"owner/repo#{pr_num}"
-            await db.execute(
-                "INSERT INTO pr_embeddings "
-                "(id, pr_id, repo, pr_number, commit_sha, embedding, "
-                "issue_number, created_at) "
-                "VALUES (?, ?, 'owner/repo', ?, 'sha', X'00', 42, ?)",
-                (f"emb-{pr_num}", pr_id, pr_num, now),
-            )
-            await db.execute(
-                "INSERT INTO pipeline_history "
-                "(id, pr_id, repo, pr_author, verdict, composite_score, "
-                "findings_count, created_at) "
-                "VALUES (?, ?, 'owner/repo', 'dev', '{}', 0.80, 0, ?)",
-                (f"h-{pr_num}", pr_id, now),
-            )
-        await db.commit()
+        async with intel_db.pool.connection() as conn:
+            for pr_num in [30, 10, 20]:
+                pr_id = f"owner/repo#{pr_num}"
+                await conn.execute(
+                    "INSERT INTO pr_embeddings "
+                    "(id, pr_id, repo, pr_number, commit_sha, embedding, "
+                    "issue_number, created_at) "
+                    "VALUES (%s, %s, 'owner/repo', %s, 'sha', %s, 42, %s)",
+                    (f"emb-{pr_num}", pr_id, pr_num, b"\x01", now),
+                )
+                await conn.execute(
+                    "INSERT INTO pipeline_history "
+                    "(id, pr_id, repo, pr_author, verdict, composite_score, "
+                    "findings_count, created_at) "
+                    "VALUES (%s, %s, 'owner/repo', 'dev', '{}', 0.80, 0, %s)",
+                    (f"h-{pr_num}", pr_id, now),
+                )
 
         ranking = await intel_db.get_ranked_prs("owner/repo", 42)
         assert len(ranking) == 3

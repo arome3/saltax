@@ -8,18 +8,13 @@ without dedup detection each burns full pipeline resources.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import re
 import time
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from openai import (
-    APIConnectionError,
-    APITimeoutError,
-    AsyncOpenAI,
-    InternalServerError,
-    RateLimitError,
-)
 
 from src.intelligence.similarity import ndarray_to_blob
 from src.intelligence.vector_index import find_similar
@@ -35,15 +30,11 @@ logger = logging.getLogger(__name__)
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _MAX_DIFF_CHARS = 12_000
-_MAX_EMBED_RETRIES = 2
-_EMBED_BACKOFF_BASE = 1.0  # seconds; doubles each attempt (1s, 2s)
 
-_RETRYABLE_EMBED_ERRORS = (
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-    RateLimitError,
-)
+# fastembed model — bge-small-en-v1.5 (int8 quantized ONNX, ~33 MB)
+_FASTEMBED_MODEL = "BAAI/bge-small-en-v1.5"
+_FASTEMBED_MODEL_TAG = "bge-small-en-v1.5"  # stored alongside embeddings
+_FASTEMBED_CACHE_DIR = "/app/model_cache"
 
 
 # ── Metrics helper ────────────────────────────────────────────────────────────
@@ -57,7 +48,77 @@ def _emit_metric(name: str, value: object, **tags: object) -> None:
     )
 
 
-# ── Embedding API ─────────────────────────────────────────────────────────────
+# ── Embedding: fastembed (primary) + feature-hash (fallback) ─────────────────
+
+_HASH_EMBED_DIM = 256
+_CODE_TOKEN_RE = re.compile(r"[a-zA-Z_][a-zA-Z0-9_]{1,}")
+_HASH_EMBED_MODEL = "local-feature-hash-256"
+
+# Module-level singleton — loaded once on first call, reused thereafter.
+_fastembed_model: Any = None
+_fastembed_available: bool | None = None  # None = not yet checked
+
+
+def _get_fastembed() -> Any:
+    """Return the fastembed TextEmbedding singleton, or None if unavailable."""
+    global _fastembed_model, _fastembed_available  # noqa: PLW0603
+
+    if _fastembed_available is False:
+        return None
+    if _fastembed_model is not None:
+        return _fastembed_model
+
+    try:
+        from fastembed import TextEmbedding  # noqa: PLC0415
+
+        _fastembed_model = TextEmbedding(
+            model_name=_FASTEMBED_MODEL,
+            cache_dir=_FASTEMBED_CACHE_DIR,
+        )
+        _fastembed_available = True
+        logger.info("fastembed loaded: %s", _FASTEMBED_MODEL)
+        return _fastembed_model
+    except Exception:
+        _fastembed_available = False
+        logger.warning(
+            "fastembed unavailable, using feature-hash fallback",
+            exc_info=True,
+        )
+        return None
+
+
+def _fastembed_embed(text: str) -> np.ndarray:
+    """Embed via fastembed (bge-small-en-v1.5).  Raises if model unavailable."""
+    model = _get_fastembed()
+    if model is None:
+        raise RuntimeError("fastembed not available")
+    # embed() is a generator; take first result
+    vec = next(model.embed([text]))
+    return np.asarray(vec, dtype=np.float32)
+
+
+def _hash_embed(text: str) -> np.ndarray:
+    """Feature-hashing fallback — zero external dependencies.
+
+    Uses the hashing trick (Weinberger et al. 2009): each token is hashed
+    to a bucket in a fixed-size vector, with a sign hash to reduce collision
+    bias.  The result is L2-normalised to unit length so cosine similarity
+    works correctly.
+    """
+    vec = np.zeros(_HASH_EMBED_DIM, dtype=np.float64)
+    tokens = _CODE_TOKEN_RE.findall(text.lower())
+    bigrams = [f"{tokens[i]}_{tokens[i + 1]}" for i in range(len(tokens) - 1)]
+
+    for feature in tokens + bigrams:
+        h = hashlib.sha256(feature.encode()).digest()
+        bucket = int.from_bytes(h[:4], "little") % _HASH_EMBED_DIM
+        sign = 1.0 if h[4] & 1 else -1.0
+        vec[bucket] += sign
+
+    norm = np.linalg.norm(vec)
+    if norm > 0:
+        vec /= norm
+    return vec.astype(np.float32)
 
 
 async def embed_diff(
@@ -65,51 +126,34 @@ async def embed_diff(
     *,
     env: EnvConfig,
     config: SaltaXConfig,
-) -> np.ndarray:
-    """Obtain an embedding vector for a PR diff via the EigenAI API.
+) -> tuple[np.ndarray, str]:
+    """Obtain an embedding vector for a PR diff.
 
-    Truncates the diff to ``_MAX_DIFF_CHARS`` to stay within token limits.
-    Retries up to ``_MAX_EMBED_RETRIES`` times on transient errors within
-    the configured timeout budget.  Always closes the API client.
+    Strategy (in priority order):
+    1. **fastembed** (``BAAI/bge-small-en-v1.5``) — semantic embeddings,
+       384-dim, runs locally via ONNX, no API calls.
+    2. **feature-hash** — lexical-only fallback if fastembed is not installed.
+
+    Returns ``(vector, model_name)`` so callers can store which method
+    produced the embedding.  Embeddings from different methods are NOT
+    comparable — ``find_similar`` must filter by model.
     """
     if not diff or not diff.strip():
         raise ValueError("Cannot embed an empty diff")
 
     truncated = diff[:_MAX_DIFF_CHARS]
 
-    client = AsyncOpenAI(
-        base_url=env.eigenai_api_url,
-        api_key=env.eigenai_api_key,
-        default_headers={"x-api-key": env.eigenai_api_key},
-    )
+    # Run fastembed in a thread to avoid blocking the event loop
+    # (ONNX inference is CPU-bound, ~50ms per embed)
+    loop = asyncio.get_running_loop()
     try:
-        async with asyncio.timeout(config.triage.dedup.embedding_api_timeout_seconds):
-            for attempt in range(_MAX_EMBED_RETRIES + 1):
-                try:
-                    response = await client.embeddings.create(
-                        model=config.triage.dedup.embedding_model,
-                        input=truncated,
-                    )
-                    vector = response.data[0].embedding
-                    return np.array(vector, dtype=np.float32)
-                except _RETRYABLE_EMBED_ERRORS as exc:
-                    if attempt == _MAX_EMBED_RETRIES:
-                        raise
-                    delay = _EMBED_BACKOFF_BASE * (2 ** attempt)
-                    logger.warning(
-                        "Embedding API call failed (attempt %d/%d): %s "
-                        "— retrying in %.1fs",
-                        attempt + 1,
-                        _MAX_EMBED_RETRIES + 1,
-                        exc,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-        # Unreachable — loop either returns or raises on final attempt
-        msg = "Embed retry loop exited unexpectedly"
-        raise RuntimeError(msg)  # pragma: no cover
-    finally:
-        await client.close()
+        vec = await loop.run_in_executor(None, _fastembed_embed, truncated)
+        return vec, _FASTEMBED_MODEL_TAG
+    except Exception:
+        logger.info("fastembed unavailable, using feature-hash fallback")
+
+    vec = _hash_embed(truncated)
+    return vec, _HASH_EMBED_MODEL
 
 
 # ── Core dedup logic ──────────────────────────────────────────────────────────
@@ -157,7 +201,7 @@ async def run_dedup_check(
 
     # 3. Embed the diff
     try:
-        query_vec = await embed_diff(diff, env=env, config=config)
+        query_vec, embed_model = await embed_diff(diff, env=env, config=config)
     except Exception:
         embed_failed = 1
         logger.exception(
@@ -176,7 +220,7 @@ async def run_dedup_check(
             pr_number=pr_number,
             commit_sha=commit_sha,
             embedding_blob=embedding_blob,
-            embedding_model=config.triage.dedup.embedding_model,
+            embedding_model=embed_model,
             issue_number=issue_number,
         )
     except Exception:
@@ -194,6 +238,8 @@ async def run_dedup_check(
             logger.debug("Failed to add embedding to vector index", exc_info=True)
 
     # 5. Find similar embeddings (HNSW if available, brute-force fallback)
+    # Filter by embedding_model so we only compare vectors from the same
+    # method — API embeddings and local feature-hash vectors are incomparable.
     threshold = config.triage.dedup.similarity_threshold
     try:
         raw_matches = await find_similar(
@@ -206,7 +252,7 @@ async def run_dedup_check(
             intel_db=intel_db,
             vector_index=vector_index,
             exclude_number=pr_number,
-            embedding_model=config.triage.dedup.embedding_model,
+            embedding_model=embed_model,
             max_scan=config.triage.dedup.max_scan_embeddings,
         )
     except Exception:

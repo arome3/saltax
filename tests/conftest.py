@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -10,6 +11,12 @@ import pytest
 
 from src.config import EnvConfig, SaltaXConfig
 from src.intelligence.database import IntelligenceDB
+
+# PostgreSQL DSN for tests — use env var or default to local Docker
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
 
 # ---------------------------------------------------------------------------
 # Valid YAML content matching the production saltax.config.yaml structure
@@ -20,6 +27,12 @@ VALID_YAML = textwrap.dedent("""\
       name: "SaltaX"
       description: "Sovereign Code Organism"
       repo: ""
+
+    database:
+      pool_min_size: 2
+      pool_max_size: 10
+      pool_timeout: 30.0
+      statement_timeout_ms: 30000
 
     pipeline:
       approval_threshold: 0.75
@@ -155,6 +168,7 @@ REQUIRED_ENV_VARS: dict[str, str] = {
     "SALTAX_GITHUB_APP_PRIVATE_KEY": "base64-test-pem",
     "SALTAX_GITHUB_WEBHOOK_SECRET": "whsec_test",
     "SALTAX_EIGENCLOUD_KMS_ENDPOINT": "https://kms.test.local",
+    "SALTAX_DATABASE_URL": "postgresql://test:test@localhost:5432/saltax_test",
 }
 
 
@@ -199,20 +213,33 @@ _FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 
 @pytest.fixture()
-async def mock_intel_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> IntelligenceDB:
-    """Real IntelligenceDB on ``tmp_path`` with mocked KMS and full production schema.
+async def mock_intel_db() -> IntelligenceDB:
+    """Real IntelligenceDB backed by a PostgreSQL test database.
 
     Named ``mock_intel_db`` (not ``intel_db``) to avoid shadowing per-file
     fixtures in existing tests.
+
+    Requires a running PostgreSQL instance. Use ``SALTAX_TEST_DATABASE_URL``
+    to override the default connection string.
     """
-    monkeypatch.setattr("src.intelligence.database.DB_PATH", tmp_path / "test.db")
-    kms = AsyncMock()
-    kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-    db = IntelligenceDB(kms=kms)
+    db = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
     try:
         await db.initialize()
         yield db  # type: ignore[misc]
     finally:
+        # Clean up all tables for test isolation
+        try:
+            pool = db.pool
+            async with pool.connection() as conn:
+                tables = await (
+                    await conn.execute(
+                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+                    )
+                ).fetchall()
+                for t in tables:
+                    await conn.execute(f'TRUNCATE TABLE "{t["tablename"]}" CASCADE')
+        except Exception:
+            pass
         await db.close()
 
 

@@ -446,7 +446,7 @@ class BackfillEngine:
 
             # Embed
             try:
-                embedding = await embed_diff(
+                embedding, embed_model = await embed_diff(
                     diff, env=self._env, config=self._config,
                 )
             except Exception:
@@ -473,7 +473,7 @@ class BackfillEngine:
                     pr_number=pr_number,
                     commit_sha=commit_sha,
                     embedding_blob=embedding_blob,
-                    embedding_model=self._config.triage.dedup.embedding_model,
+                    embedding_model=embed_model,
                     issue_number=issue_number,
                 )
             except Exception:

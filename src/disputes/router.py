@@ -4,7 +4,7 @@ Core orchestration layer between the external dispute providers (EigenVerify,
 MoltCourt) and the internal verification/staking systems.
 
 Concurrency model:
-- DB writes are serialized through ``IntelligenceDB._write_lock``.
+- DB writes use PostgreSQL MVCC (no application-level lock needed).
 - On-chain operations are serialized through ``WalletManager._tx_lock``
   (via StakeResolver / StakingContract).
 - Each dispute is independent — no shared mutable state between disputes.

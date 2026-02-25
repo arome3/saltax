@@ -7,6 +7,8 @@ close/reopen and concurrent writes.
 
 from __future__ import annotations
 
+import os
+
 import asyncio
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -17,6 +19,11 @@ from src.attestation.engine import AttestationEngine
 from src.attestation.store import AttestationStore
 from src.attestation.verifier import verify_chain
 from src.intelligence.database import IntelligenceDB
+
+_TEST_DATABASE_URL = os.environ.get(
+    "SALTAX_TEST_DATABASE_URL",
+    "postgresql://postgres:postgres@localhost:5432/saltax_test",
+)
 
 if TYPE_CHECKING:
     from src.models.attestation import AttestationProof
@@ -97,18 +104,11 @@ class TestAttestationChainIntegration:
 
     async def test_chain_survives_db_close_reopen(
         self,
-        tmp_path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Close and reopen DB — chain still valid after reload."""
-        db_path = tmp_path / "attestation_reopen.db"
-        monkeypatch.setattr("src.intelligence.database.DB_PATH", db_path)
-
-        kms = AsyncMock()
-        kms.unseal = AsyncMock(side_effect=Exception("no sealed data"))
-
         # First session: create 2 proofs
-        db1 = IntelligenceDB(kms=kms)
+        db1 = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
         try:
             await db1.initialize()
             wallet = _make_wallet()
@@ -133,7 +133,7 @@ class TestAttestationChainIntegration:
             await db1.close()
 
         # Second session: reopen, add 1 more proof
-        db2 = IntelligenceDB(kms=kms)
+        db2 = IntelligenceDB(database_url=_TEST_DATABASE_URL, pool_min_size=1, pool_max_size=3)
         try:
             await db2.initialize()
             store2 = AttestationStore(db2)

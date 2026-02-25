@@ -415,73 +415,41 @@ class TestPaymentVerifier:
 
 
 class TestTxHashStore:
-    """Tests for the durable transaction hash store."""
+    """Tests for the durable transaction hash store (PostgreSQL-backed)."""
 
-    async def test_new_hash_returns_false(self, tmp_path) -> None:
+    @pytest.fixture()
+    async def tx_store(self, mock_intel_db):
+        """TxHashStore sharing the IntelligenceDB connection pool."""
+        from src.api.middleware.tx_store import TxHashStore
+
+        return TxHashStore(pool=mock_intel_db.pool)
+
+    async def test_new_hash_returns_false(self, tx_store) -> None:
         """First time seeing a tx_hash → returns False (not duplicate)."""
-        from src.api.middleware.tx_store import TxHashStore
+        result = await tx_store.check_and_record("0x" + "a" * 64, "audit-001")
+        assert result is False
 
-        store = TxHashStore(db_path=tmp_path / "tx.db")
-        await store.initialize()
-        try:
-            result = await store.check_and_record("0x" + "a" * 64, "audit-001")
-            assert result is False
-        finally:
-            await store.close()
-
-    async def test_duplicate_hash_returns_true(self, tmp_path) -> None:
+    async def test_duplicate_hash_returns_true(self, tx_store) -> None:
         """Second time seeing the same tx_hash → returns True (duplicate)."""
+        await tx_store.check_and_record("0x" + "b" * 64, "audit-001")
+        result = await tx_store.check_and_record("0x" + "b" * 64, "audit-002")
+        assert result is True
+
+    async def test_persistence_across_close_and_reopen(self, tx_store) -> None:
+        """tx_hash persists in PostgreSQL — survives store recreation."""
         from src.api.middleware.tx_store import TxHashStore
 
-        store = TxHashStore(db_path=tmp_path / "tx.db")
-        await store.initialize()
-        try:
-            await store.check_and_record("0x" + "b" * 64, "audit-001")
-            result = await store.check_and_record("0x" + "b" * 64, "audit-002")
-            assert result is True
-        finally:
-            await store.close()
+        await tx_store.check_and_record("0x" + "c" * 64, "audit-001")
 
-    async def test_persistence_across_close_and_reopen(self, tmp_path) -> None:
-        """tx_hash survives close() and reopen — durable storage."""
-        from src.api.middleware.tx_store import TxHashStore
+        # Create a new TxHashStore pointing to the same pool
+        store2 = TxHashStore(pool=tx_store._pool)
+        result = await store2.check_and_record("0x" + "c" * 64, "audit-002")
+        assert result is True  # Still seen — shared PostgreSQL table
 
-        db_path = tmp_path / "tx.db"
-
-        # Write a hash and close
-        store1 = TxHashStore(db_path=db_path)
-        await store1.initialize()
-        await store1.check_and_record("0x" + "c" * 64, "audit-001")
-        await store1.close()
-
-        # Reopen and check
-        store2 = TxHashStore(db_path=db_path)
-        await store2.initialize()
-        try:
-            result = await store2.check_and_record("0x" + "c" * 64, "audit-002")
-            assert result is True  # Still seen after restart
-        finally:
-            await store2.close()
-
-    async def test_empty_hash_returns_false(self, tmp_path) -> None:
+    async def test_empty_hash_returns_false(self, tx_store) -> None:
         """Empty tx_hash is treated as 'not seen' (no-op)."""
-        from src.api.middleware.tx_store import TxHashStore
-
-        store = TxHashStore(db_path=tmp_path / "tx.db")
-        await store.initialize()
-        try:
-            result = await store.check_and_record("", "audit-001")
-            assert result is False
-        finally:
-            await store.close()
-
-    async def test_uninitialized_raises_runtime_error(self, tmp_path) -> None:
-        """Calling check_and_record before initialize() raises RuntimeError."""
-        from src.api.middleware.tx_store import TxHashStore
-
-        store = TxHashStore(db_path=tmp_path / "tx.db")
-        with pytest.raises(RuntimeError, match="not initialized"):
-            await store.check_and_record("0xabc", "audit-001")
+        result = await tx_store.check_and_record("", "audit-001")
+        assert result is False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

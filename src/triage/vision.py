@@ -150,7 +150,7 @@ async def ingest_vision_document(
             from src.intelligence.similarity import ndarray_to_blob  # noqa: PLC0415
             from src.triage.dedup import embed_diff  # noqa: PLC0415
 
-            vec = await embed_diff(content, env=env, config=config)
+            vec, _model = await embed_diff(content, env=env, config=config)
             embedding_blob = ndarray_to_blob(vec)
         except Exception:
             logger.warning("Failed to embed vision document", exc_info=True)

@@ -78,9 +78,7 @@ async def create_window(
         attestation_json=json.dumps(attestation, default=str),
         contributor_address=contributor_address,
         bounty_amount_wei=str(bounty_amount_wei or 0),
-        stake_amount_wei=str(
-            stake_amount_wei if stake_amount_wei is not None else (bounty_amount_wei or 0),
-        ),
+        stake_amount_wei=str(stake_amount_wei or 0),
         window_hours=hours,
         opens_at=opens_at,
         closes_at=closes_at,
