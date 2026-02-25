@@ -103,6 +103,7 @@ class IntelligenceDB:
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
             kwargs={"autocommit": True, "row_factory": dict_row},
+            open=False,
         )
         try:
             await self._pool.open()
