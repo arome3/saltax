@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 # ── Module constants ─────────────────────────────────────────────────────────
 
 _FP_THRESHOLD = 0.8
+_MIN_FEEDBACK_FOR_SUPPRESSION = 5
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 16
+_CURRENT_SCHEMA_VERSION = 17
 _MAX_LIKE_TOKENS = 20
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -168,16 +169,23 @@ class IntelligenceDB:
 
         Uses DefectDojo-style integer counters: FP rate is computed
         dynamically from ``confirmed_true_positive`` / ``confirmed_false_positive``.
+
+        A minimum of ``_MIN_FEEDBACK_FOR_SUPPRESSION`` total signals is
+        required before a rule can be suppressed.  This prevents premature
+        suppression from a handful of noisy reactions.
         """
         pool = self._require_pool()
         sql = """\
             SELECT DISTINCT rule_id FROM vulnerability_patterns
             WHERE confirmed_false_positive > 0
+              AND (confirmed_true_positive + confirmed_false_positive) >= %s
               AND CAST(confirmed_false_positive AS REAL) /
                   (confirmed_true_positive + confirmed_false_positive) > %s
         """
         async with pool.connection() as conn:
-            rows = await (await conn.execute(sql, (_FP_THRESHOLD,))).fetchall()
+            rows = await (
+                await conn.execute(sql, (_MIN_FEEDBACK_FOR_SUPPRESSION, _FP_THRESHOLD))
+            ).fetchall()
             return frozenset(row["rule_id"] for row in rows)
 
     async def query_similar_patterns(
@@ -248,6 +256,52 @@ class IntelligenceDB:
                     "WHERE id = %s",
                     (pattern_id,),
                 )
+
+    async def record_feedback_signal(
+        self,
+        rule_id: str,
+        repo: str,
+        pr_number: int,
+        comment_id: int,
+        reactor_login: str,
+        reaction: str,
+    ) -> bool:
+        """Record a feedback signal from a GitHub reaction.
+
+        Inserts a row into ``feedback_log`` and increments the appropriate
+        counter (TP or FP) on all ``vulnerability_patterns`` matching
+        *rule_id*.  Uses ``ON CONFLICT DO NOTHING`` for idempotency.
+
+        Returns ``True`` if a new signal was recorded, ``False`` if the
+        signal was a duplicate (already recorded for this rule/repo/PR/
+        reactor/reaction combination).
+        """
+        pool = self._require_pool()
+        signal_id = uuid.uuid4().hex
+
+        async with pool.connection() as conn, conn.transaction():
+            cur = await conn.execute(
+                "INSERT INTO feedback_log "
+                "(id, rule_id, repo, pr_number, comment_id, reactor_login, reaction) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (signal_id, rule_id, repo, pr_number, comment_id, reactor_login, reaction),
+            )
+            if cur.rowcount == 0:
+                return False
+
+            counter_col = (
+                "confirmed_true_positive"
+                if reaction == "+1"
+                else "confirmed_false_positive"
+            )
+            await conn.execute(
+                f"UPDATE vulnerability_patterns "  # noqa: S608
+                f"SET {counter_col} = {counter_col} + 1 "
+                "WHERE rule_id = %s",
+                (rule_id,),
+            )
+        return True
 
     # ── Ingestion ────────────────────────────────────────────────────────
 

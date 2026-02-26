@@ -521,3 +521,55 @@ class TestDispatchDecision:
         ):
             # Should not raise
             await dispatch_decision(state, config, client, intel_db=intel_db)
+
+
+# =============================================================================
+# E. Findings marker in advisory body (feedback learning)
+# =============================================================================
+
+
+class TestFindingsMarker:
+    """Verify saltax-findings HTML comment embedding for feedback learning."""
+
+    def test_advisory_body_contains_findings_marker(self) -> None:
+        state = _make_state(static_findings=[
+            {"rule_id": "semgrep.sqli", "severity": "HIGH", "message": "SQL injection"},
+            {"rule_id": "semgrep.xss", "severity": "MEDIUM", "message": "XSS"},
+        ])
+        body = _build_advisory_body(state)
+        assert "<!-- saltax-findings:semgrep.sqli,semgrep.xss -->" in body
+
+    def test_advisory_body_no_marker_without_findings(self) -> None:
+        state = _make_state(static_findings=[])
+        body = _build_advisory_body(state)
+        assert "saltax-findings" not in body
+
+    def test_deduplicates_rule_ids(self) -> None:
+        state = _make_state(static_findings=[
+            {"rule_id": "rule-a", "severity": "HIGH", "message": "msg1"},
+            {"rule_id": "rule-a", "severity": "HIGH", "message": "msg2"},
+        ])
+        body = _build_advisory_body(state)
+        assert "<!-- saltax-findings:rule-a -->" in body
+
+    def test_findings_without_rule_id_ignored(self) -> None:
+        state = _make_state(static_findings=[
+            {"severity": "HIGH", "message": "no rule_id"},
+        ])
+        body = _build_advisory_body(state)
+        assert "saltax-findings" not in body
+
+    def test_ai_findings_included_in_marker(self) -> None:
+        state = _make_state(
+            static_findings=[{"rule_id": "static-rule", "severity": "HIGH", "message": "m"}],
+            ai_analysis={
+                "quality_score": 0.8,
+                "risk_score": 0.2,
+                "findings": [
+                    {"rule_id": "ai-rule", "message": "AI found issue"},
+                ],
+            },
+        )
+        body = _build_advisory_body(state)
+        assert "ai-rule" in body
+        assert "static-rule" in body

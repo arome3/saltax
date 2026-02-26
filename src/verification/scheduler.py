@@ -291,6 +291,24 @@ class VerificationScheduler:
             extra={"window_id": window_id, "pr_number": pr_number},
         )
 
+        # Best-effort: collect reaction feedback before payout
+        try:
+            from src.feedback.reaction_handler import collect_reactions_for_pr  # noqa: PLC0415
+
+            await collect_reactions_for_pr(
+                repo=repo,
+                pr_number=pr_number,
+                installation_id=installation_id,
+                github_client=self._github_client,
+                intel_db=self._intel_db,
+            )
+        except Exception:
+            logger.debug(
+                "Reaction collection skipped after merge",
+                exc_info=True,
+                extra={"window_id": window_id},
+            )
+
         await self._send_payout(window)
 
     async def _execute_self_merge_window(self, window: dict[str, object]) -> None:

@@ -149,6 +149,22 @@ def _build_advisory_body(state: PipelineState) -> str:
         f"*SaltaX attestation: `{attestation_id}`*",
     ])
 
+    # Embed rule_id markers for feedback learning (invisible HTML comment)
+    rule_ids_set: set[str] = set()
+    for f in state.static_findings:
+        rid = f.get("rule_id")
+        if rid:
+            rule_ids_set.add(str(rid))
+    if state.ai_analysis:
+        ai_findings = state.ai_analysis.get("findings", [])
+        if isinstance(ai_findings, list):
+            for f in ai_findings:
+                rid = f.get("rule_id") if isinstance(f, dict) else None
+                if rid:
+                    rule_ids_set.add(str(rid))
+    if rule_ids_set:
+        lines.append(f"<!-- saltax-findings:{','.join(sorted(rule_ids_set))} -->")
+
     return "\n".join(lines)
 
 

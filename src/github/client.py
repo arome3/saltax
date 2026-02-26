@@ -597,6 +597,36 @@ class GitHubClient:
         result: dict[str, Any] = response.json()
         return result
 
+    async def get_comment_reactions(
+        self,
+        repo: str,
+        comment_id: int,
+        installation_id: int,
+        *,
+        content: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch reactions on an issue/PR comment.
+
+        Parameters
+        ----------
+        content:
+            Optional reaction type filter (e.g. ``"+1"``, ``"-1"``).
+            When provided, only reactions of that type are returned.
+
+        Returns at most 100 reactions (single page, v1 limitation).
+        """
+        params: dict[str, str | int] = {"per_page": 100}
+        if content is not None:
+            params["content"] = content
+        response = await self._request(
+            "GET",
+            f"/repos/{repo}/issues/comments/{comment_id}/reactions",
+            installation_id=installation_id,
+            params=params,
+        )
+        result: list[dict[str, Any]] = response.json()
+        return result
+
     async def add_label(
         self,
         repo: str,
