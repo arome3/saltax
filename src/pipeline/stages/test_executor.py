@@ -282,7 +282,9 @@ async def _run_test_suite(
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        preexec_fn=_set_resource_limits(config.pipeline.test_executor_memory_mb),
+        # No RLIMIT_AS here — shared libraries (NumPy/OpenBLAS) can require
+        # >1 GB of virtual address space for memory-mapped .so files.  The
+        # asyncio.wait_for timeout already guards against runaway processes.
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -383,10 +385,11 @@ def _subprocess_env(tmp_dir: str) -> dict[str, str]:
 # Jest / Vitest: flexible pair-matching for any status order
 _JEST_SUMMARY_LINE_RE = re.compile(r"Tests:?\s+(.+)")
 _JEST_PAIR_RE = re.compile(r"(\d+)\s+(failed|passed|skipped|pending|todo|total)")
-# Pytest: "18 passed, 2 failed, 1 skipped"
+# Pytest: "18 passed, 2 failed, 1 skipped, 3 errors"
 _PYTEST_PASSED_RE = re.compile(r"(\d+)\s+passed")
 _PYTEST_FAILED_RE = re.compile(r"(\d+)\s+failed")
 _PYTEST_SKIPPED_RE = re.compile(r"(\d+)\s+skipped")
+_PYTEST_ERRORS_RE = re.compile(r"(\d+)\s+errors?")
 # Cargo: "test result: ok. 18 passed; 0 failed; 1 ignored"
 _CARGO_RESULT_RE = re.compile(
     r"test result:\s+\w+\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored",
@@ -427,9 +430,13 @@ def _parse_jest_counts(output: str) -> tuple[int, int, int]:
 
 
 def _parse_pytest_counts(output: str) -> tuple[int, int, int]:
-    """Parse pytest summary line."""
+    """Parse pytest summary line.
+
+    Pytest "errors" (fixture/collection failures) are counted as failed
+    tests because they represent tests that could not execute.
+    """
     passed = _first_int(_PYTEST_PASSED_RE, output)
-    failed = _first_int(_PYTEST_FAILED_RE, output)
+    failed = _first_int(_PYTEST_FAILED_RE, output) + _first_int(_PYTEST_ERRORS_RE, output)
     skipped = _first_int(_PYTEST_SKIPPED_RE, output)
     return (passed, failed, skipped)
 

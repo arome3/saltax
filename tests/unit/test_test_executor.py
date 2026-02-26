@@ -155,6 +155,21 @@ class TestParsePytestCounts:
         output = "10 passed, 3 deselected in 3.00s"
         assert _parse_pytest_counts(output) == (10, 0, 0)
 
+    def test_errors_counted_as_failures(self) -> None:
+        """Pytest 'errors' (fixture/collection failures) are added to failed count."""
+        output = "5 passed, 2 failed, 3 errors in 2.50s"
+        assert _parse_pytest_counts(output) == (5, 5, 0)
+
+    def test_errors_only(self) -> None:
+        """All tests erroring still produces a non-zero total."""
+        output = "10 errors in 1.00s"
+        assert _parse_pytest_counts(output) == (0, 10, 0)
+
+    def test_single_error(self) -> None:
+        """Singular 'error' also matches."""
+        output = "1 error in 0.50s"
+        assert _parse_pytest_counts(output) == (0, 1, 0)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # C. _parse_cargo_counts
@@ -659,7 +674,7 @@ class TestRunCmdMemory:
     """Verify memory_mb is passed through to _set_resource_limits."""
 
     async def test_install_uses_config_memory(self) -> None:
-        """_install_deps passes config memory_mb to _run_cmd → _set_resource_limits."""
+        """_install_deps passes config memory_mb × 4 to _set_resource_limits."""
         state = _make_state()
         config = _make_config()
 
@@ -691,9 +706,9 @@ class TestRunCmdMemory:
             mock_detect.return_value = _LANGUAGES[1]  # nodejs
             await run_tests(state, config)
 
-        # Install + test both call _set_resource_limits with config value
-        expected = config.pipeline.test_executor_memory_mb
-        assert expected in captured_memory
+        # Install uses 4× config memory; test suite has no RLIMIT_AS
+        expected_install = config.pipeline.test_executor_memory_mb * 4
+        assert expected_install in captured_memory
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
