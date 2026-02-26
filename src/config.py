@@ -61,7 +61,7 @@ class PipelineConfig(BaseModel):
     ai_analyzer_timeout: int = Field(default=60, gt=0)
     ai_analyzer_semaphore_timeout: int = Field(default=30, gt=0)
     test_executor_timeout: int = Field(default=300, gt=0)
-    test_executor_memory_mb: int = Field(default=512, gt=0)
+    test_executor_memory_mb: int = Field(default=2048, gt=0)
     history_weight: float = Field(default=0.0, ge=0.0, le=0.30)
 
     @model_validator(mode="before")
@@ -352,6 +352,14 @@ class DatabaseConfig(BaseModel):
     statement_timeout_ms: int = Field(default=30_000, gt=0)
 
 
+class FeedbackConfig(BaseModel):
+    """Reaction-based feedback learning configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -382,6 +390,7 @@ class SaltaXConfig(BaseModel):
     triage: TriageConfig = Field(default_factory=TriageConfig)
     backfill: BackfillConfig = Field(default_factory=BackfillConfig)
     patrol: PatrolConfig = Field(default_factory=PatrolConfig)
+    feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
 
     @model_validator(mode="before")
     @classmethod

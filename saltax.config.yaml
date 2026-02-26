@@ -27,7 +27,7 @@ pipeline:
     test_executor:
       enabled: true
       timeout_seconds: 120
-      memory_limit_mb: 512
+      memory_limit_mb: 2048
     decision_engine:
       weights:
         static_clear: 0.25

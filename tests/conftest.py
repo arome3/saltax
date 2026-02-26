@@ -51,7 +51,7 @@ VALID_YAML = textwrap.dedent("""\
         test_executor:
           enabled: true
           timeout_seconds: 300
-          memory_limit_mb: 512
+          memory_limit_mb: 2048
         decision_engine:
           weights:
             static_clear: 0.25
@@ -158,6 +158,9 @@ VALID_YAML = textwrap.dedent("""\
           MEDIUM: "bounty-md"
           LOW: "bounty-sm"
         max_open_bounties_per_repo: 10
+
+    feedback:
+      enabled: true
 """)
 
 # ---------------------------------------------------------------------------
@@ -255,6 +258,7 @@ def mock_github_client() -> AsyncMock:
     client.create_comment = AsyncMock(return_value=None)
     client.merge_pr = AsyncMock(return_value={"merged": True})
     client.add_labels = AsyncMock(return_value=None)
+    client.get_comment_reactions = AsyncMock(return_value=[])
     # CI gate defaults — no external CI → NO_CI → merge proceeds
     client.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
     client.list_check_runs_for_ref = AsyncMock(return_value=[])

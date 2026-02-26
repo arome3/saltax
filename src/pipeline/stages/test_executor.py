@@ -56,7 +56,10 @@ _LANGUAGES: tuple[_LangConfig, ...] = (
         detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
         install_cmd=["pip", "install", "-e", ".[test]", "--quiet"],
         install_fallback=["pip", "install", "-e", ".", "--quiet"],
-        test_cmd=["python", "-m", "pytest", "--tb=short", "-q"],
+        test_cmd=[
+            "python", "-m", "pytest", "--tb=short", "-q",
+            "--ignore=tests/integration", "--ignore=tests/e2e",
+        ],
     ),
     _LangConfig(
         name="nodejs",
