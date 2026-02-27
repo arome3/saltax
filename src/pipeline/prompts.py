@@ -103,6 +103,20 @@ _MAX_DIFF_CHARS = 15_000
 _MAX_STATIC_FINDINGS = 20
 _MAX_INTEL_MATCHES = 10
 _MAX_VISION_CHARS = 5_000
+_MAX_CUSTOM_RULES_CHARS = 6_000
+
+_CUSTOM_RULES_SECTION = """\
+## Custom Review Rules
+
+The repository owner has defined the following review standards.
+Evaluate the PR diff against each applicable rule and flag violations.
+
+{rules_text}
+
+For each rule violation found, include it in your findings with:
+- rule_id: "custom:<rule-name-slug>" (e.g., "custom:no-raw-sql-in-api-routes")
+- severity: as specified by the rule
+- A clear explanation of how the code violates the rule"""
 
 
 # ── Builders ─────────────────────────────────────────────────────────────────
@@ -129,7 +143,9 @@ def build_analyzer_user_prompt(
     static_findings: list[dict[str, object]],
     intel_matches: list[dict[str, object]],
     vision_document: str | None = None,
+    custom_rules_text: str | None = None,
     max_diff_chars: int = _MAX_DIFF_CHARS,
+    max_custom_rules_chars: int = _MAX_CUSTOM_RULES_CHARS,
 ) -> str:
     """Assemble the user prompt from PR diff, static findings, and context."""
     parts: list[str] = []
@@ -161,7 +177,16 @@ def build_analyzer_user_prompt(
             "## Static Analysis Findings\n" + "\n".join(lines)
         )
 
-    # 3. Intelligence matches (cap 10)
+    # 3. Custom review rules (between static findings and intel matches)
+    if custom_rules_text:
+        truncated_rules = custom_rules_text[:max_custom_rules_chars]
+        if len(custom_rules_text) > max_custom_rules_chars:
+            truncated_rules += "\n... [remaining rules truncated]"
+        parts.append(
+            _CUSTOM_RULES_SECTION.format(rules_text=truncated_rules)
+        )
+
+    # 4. Intelligence matches (cap 10)
     if intel_matches:
         capped = intel_matches[:_MAX_INTEL_MATCHES]
         lines = []
@@ -173,7 +198,7 @@ def build_analyzer_user_prompt(
             "## Known Pattern Matches\n" + "\n".join(lines)
         )
 
-    # 4. Vision document — also wrapped in XML tags
+    # 5. Vision document — also wrapped in XML tags
     if vision_document:
         truncated_vision = vision_document[:_MAX_VISION_CHARS]
         if len(vision_document) > _MAX_VISION_CHARS:

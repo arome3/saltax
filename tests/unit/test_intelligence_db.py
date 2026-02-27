@@ -143,7 +143,7 @@ class TestSchemaCreation:
             )
             row = await cursor.fetchone()
         assert row is not None
-        assert row["version"] == 16
+        assert row["version"] == 17
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -303,6 +303,145 @@ class TestGetFalsePositiveSignatures:
 
         result = await intel_db.get_false_positive_signatures()
         assert "good-rule" not in result
+
+    async def test_min_signals_guard(self, intel_db: IntelligenceDB) -> None:
+        """Rules with fewer than 5 total signals should NOT be suppressed."""
+        async with intel_db.pool.connection() as conn:
+            # 0 TP + 4 FP = 100% FP rate but only 4 signals (below threshold)
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('few1', 'few-signal-rule', 'LOW', 'lint', 'pattern', 'sig-few',
+                        0.5, 10, '2024-01-01', '2024-01-01', 'static_scanner', 0, 4)
+                """,
+            )
+
+        result = await intel_db.get_false_positive_signatures()
+        assert "few-signal-rule" not in result
+
+        # Now bump to exactly 5 FP → should appear
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE vulnerability_patterns "
+                "SET confirmed_false_positive = 5 "
+                "WHERE id = 'few1'",
+            )
+
+        result = await intel_db.get_false_positive_signatures()
+        assert "few-signal-rule" in result
+
+
+class TestRecordFeedbackSignal:
+    """Test the feedback signal recording from reactions."""
+
+    async def test_new_signal_returns_true(self, intel_db: IntelligenceDB) -> None:
+        """A brand-new feedback signal inserts and returns True."""
+        # Insert a pattern to update
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('p1', 'test-rule', 'MEDIUM', 'security', 'pattern', 'sig-fb1',
+                        0.5, 1, '2024-01-01', '2024-01-01', 'static_scanner', 0, 0)
+                """,
+            )
+
+        result = await intel_db.record_feedback_signal(
+            rule_id="test-rule",
+            repo="owner/repo",
+            pr_number=42,
+            comment_id=100,
+            reactor_login="alice",
+            reaction="+1",
+        )
+        assert result is True
+
+        # Verify counter incremented
+        async with intel_db.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT confirmed_true_positive, confirmed_false_positive "
+                    "FROM vulnerability_patterns WHERE id = 'p1'",
+                )
+            ).fetchone()
+        assert row is not None
+        assert row["confirmed_true_positive"] == 1
+        assert row["confirmed_false_positive"] == 0
+
+    async def test_duplicate_signal_returns_false(self, intel_db: IntelligenceDB) -> None:
+        """Duplicate signal (same rule/repo/PR/reactor/reaction) returns False."""
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('p2', 'dup-rule', 'LOW', 'lint', 'pattern', 'sig-fb2',
+                        0.5, 1, '2024-01-01', '2024-01-01', 'static_scanner', 0, 0)
+                """,
+            )
+
+        # First call succeeds
+        r1 = await intel_db.record_feedback_signal(
+            rule_id="dup-rule", repo="owner/repo", pr_number=1,
+            comment_id=200, reactor_login="bob", reaction="-1",
+        )
+        assert r1 is True
+
+        # Duplicate call returns False
+        r2 = await intel_db.record_feedback_signal(
+            rule_id="dup-rule", repo="owner/repo", pr_number=1,
+            comment_id=200, reactor_login="bob", reaction="-1",
+        )
+        assert r2 is False
+
+        # Counter should only be incremented once
+        async with intel_db.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT confirmed_false_positive "
+                    "FROM vulnerability_patterns WHERE id = 'p2'",
+                )
+            ).fetchone()
+        assert row is not None
+        assert row["confirmed_false_positive"] == 1
+
+    async def test_negative_reaction_increments_fp(self, intel_db: IntelligenceDB) -> None:
+        """A -1 reaction increments confirmed_false_positive."""
+        async with intel_db.pool.connection() as conn:
+            await conn.execute(
+                """\
+                INSERT INTO vulnerability_patterns
+                    (id, rule_id, severity, category, normalized_pattern,
+                     pattern_signature, confidence, times_seen, first_seen, last_seen,
+                     source_stage, confirmed_true_positive, confirmed_false_positive)
+                VALUES ('p3', 'neg-rule', 'HIGH', 'security', 'pattern', 'sig-fb3',
+                        0.5, 1, '2024-01-01', '2024-01-01', 'static_scanner', 0, 0)
+                """,
+            )
+
+        await intel_db.record_feedback_signal(
+            rule_id="neg-rule", repo="owner/repo", pr_number=5,
+            comment_id=300, reactor_login="carol", reaction="-1",
+        )
+
+        async with intel_db.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT confirmed_true_positive, confirmed_false_positive "
+                    "FROM vulnerability_patterns WHERE id = 'p3'",
+                )
+            ).fetchone()
+        assert row is not None
+        assert row["confirmed_true_positive"] == 0
+        assert row["confirmed_false_positive"] == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1425,7 +1564,7 @@ class TestIssueEmbeddings:
             )
             row = await cursor.fetchone()
         assert row is not None
-        assert row["version"] == 16
+        assert row["version"] == 17
 
 
 # ── V. Patrol CRUD ───────────────────────────────────────────────────────────

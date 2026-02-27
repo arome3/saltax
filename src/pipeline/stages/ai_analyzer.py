@@ -172,7 +172,7 @@ async def _get_grant_credentials(
     signature = raw_hex if raw_hex.startswith("0x") else ("0x" + raw_hex)
 
     _grant_cache[address] = (grant_message, signature)
-    logger.info("Determinal grant credentials cached for %s", address[:10])
+    logger.info("Determinal grant cached for wallet %s", address[:10])
     return {"grantMessage": grant_message, "grantSignature": signature, "walletAddress": address}
 
 
@@ -257,6 +257,7 @@ async def run_ai_analysis(
             vision_document=(
                 state.vision_document if vision_enabled else None
             ),
+            custom_rules_text=state.custom_rules_text,
         )
 
         # 3b. Prompt injection detection (Fix 3)
@@ -302,6 +303,7 @@ async def run_ai_analysis(
                 vision_document=(
                     state.vision_document if vision_enabled else None
                 ),
+                custom_rules_text=state.custom_rules_text,
                 max_diff_chars=_MAX_DIFF_CHARS // 2,
             )
             if markers:

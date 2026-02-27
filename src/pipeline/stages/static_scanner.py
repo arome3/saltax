@@ -107,13 +107,29 @@ async def run_static_scan(
                     timeout=_APPLY_TIMEOUT,
                 )
 
-        cmd = _build_semgrep_command(repo_dir, config)
+        cmd = _build_semgrep_command(
+            repo_dir, config,
+            include_paths=state.scan_include,
+            exclude_paths=state.scan_exclude,
+        )
         raw_json = await asyncio.wait_for(
             _run_semgrep(cmd),
             timeout=config.pipeline.static_scanner_timeout,
         )
 
         findings = _parse_semgrep_output(raw_json)
+
+        # Post-filter findings to changed files only
+        if state.diff:
+            from src.selfmerge.detector import extract_modified_files  # noqa: PLC0415
+
+            changed = extract_modified_files(state.diff)
+            if changed:
+                before = len(findings)
+                findings = [f for f in findings if f.file_path in changed]
+                filtered_count = before - len(findings)
+                if filtered_count:
+                    logger.info("Filtered %d finding(s) outside changed files", filtered_count)
 
         # Filter known false positives — preserve findings if DB query fails
         try:
@@ -132,6 +148,19 @@ async def run_static_scan(
 
         counts = _count_by_severity(findings)
         elapsed = time.monotonic() - t0
+
+        # Log individual findings for traceability
+        for f in findings:
+            logger.info(
+                "  finding: %s | %s | %s:%d-%d | %s",
+                f.severity.value,
+                f.rule_id,
+                f.file_path,
+                f.line_start,
+                f.line_end,
+                f.message[:120],
+            )
+
         logger.info(
             "Static scan completed: %d finding(s) in %.1fs | %s | short_circuit=%s",
             len(findings),
@@ -224,12 +253,22 @@ async def _apply_diff(diff: str, repo_dir: Path) -> None:
         )
 
 
-def _build_semgrep_command(repo_dir: Path, config: SaltaXConfig) -> list[str]:
+def _build_semgrep_command(
+    repo_dir: Path,
+    config: SaltaXConfig,
+    *,
+    include_paths: tuple[str, ...] = (),
+    exclude_paths: tuple[str, ...] = (),
+) -> list[str]:
     """Assemble the Semgrep CLI invocation.
 
     Only operator-controlled rulesets are loaded. The cloned repo's
     ``.semgrep/`` directory is intentionally NOT loaded — the entity being
     audited must not influence the auditing tool's ruleset.
+
+    *include_paths* and *exclude_paths* map to Semgrep's ``--include`` /
+    ``--exclude`` CLI flags for scan-scope filtering from the rules file's
+    ``## Scan Configuration`` section.
     """
     cmd: list[str] = [
         "semgrep",
@@ -244,6 +283,11 @@ def _build_semgrep_command(repo_dir: Path, config: SaltaXConfig) -> list[str]:
 
     if _CUSTOM_RULES_DIR.is_dir():
         cmd.extend(["--config", str(_CUSTOM_RULES_DIR)])
+
+    for pattern in include_paths:
+        cmd.extend(["--include", pattern])
+    for pattern in exclude_paths:
+        cmd.extend(["--exclude", pattern])
 
     cmd.append(str(repo_dir))
     return cmd

@@ -37,6 +37,9 @@ class PipelineState:
     target_issue_number: int | None = None
     duplicate_candidates: list[dict[str, object]] = field(default_factory=list)
     vision_document: str | None = None
+    custom_rules_text: str | None = None
+    scan_include: tuple[str, ...] = ()
+    scan_exclude: tuple[str, ...] = ()
 
     # ── Stage output fields (populated as pipeline executes) ────────────────
     static_findings: list[dict[str, object]] = field(default_factory=list)

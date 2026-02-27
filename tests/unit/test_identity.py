@@ -472,7 +472,7 @@ class TestIdentityBridgeClient:
     async def test_returns_none_on_timeout(self):
         """register_agent returns None when bridge is unreachable."""
         # Use a non-routable address to trigger a connection error
-        client = IdentityBridgeClient("http://192.0.2.1:1")
+        client = IdentityBridgeClient("http://127.0.0.1:1")
         try:
             result = await client.register_agent(
                 "test", "test", 1,
@@ -483,7 +483,7 @@ class TestIdentityBridgeClient:
 
     async def test_get_reputation_returns_none_on_error(self):
         """get_reputation_summary returns None when bridge is unreachable."""
-        client = IdentityBridgeClient("http://192.0.2.1:1")
+        client = IdentityBridgeClient("http://127.0.0.1:1")
         try:
             result = await client.get_reputation_summary("agent-1")
             assert result is None

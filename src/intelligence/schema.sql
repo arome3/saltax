@@ -33,6 +33,23 @@ CREATE INDEX IF NOT EXISTS idx_vp_rule_id ON vulnerability_patterns(rule_id);
 CREATE INDEX IF NOT EXISTS idx_vp_category ON vulnerability_patterns(category);
 CREATE INDEX IF NOT EXISTS idx_vp_severity ON vulnerability_patterns(severity);
 
+-- ── Feedback log (reaction signals from GitHub) ─────────────────────────────
+
+CREATE TABLE IF NOT EXISTS feedback_log (
+    id              TEXT PRIMARY KEY,
+    rule_id         TEXT NOT NULL,
+    repo            TEXT NOT NULL,
+    pr_number       INTEGER NOT NULL,
+    comment_id      BIGINT NOT NULL,
+    reactor_login   TEXT NOT NULL,
+    reaction        TEXT NOT NULL,
+    recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE(rule_id, repo, pr_number, reactor_login, reaction)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fl_rule_id ON feedback_log(rule_id);
+CREATE INDEX IF NOT EXISTS idx_fl_repo_pr ON feedback_log(repo, pr_number);
+
 -- ── Contributor profiles ────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS contributor_profiles (
@@ -59,6 +76,8 @@ CREATE TABLE IF NOT EXISTS codebase_knowledge (
     knowledge   TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_ck_repo_filepath ON codebase_knowledge(repo, file_path);
 
 -- ── Pipeline history ────────────────────────────────────────────────────────
 

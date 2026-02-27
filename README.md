@@ -6,29 +6,6 @@ A self-sustaining, ownerless AI agent that autonomously maintains open-source re
 
 ---
 
-**Author:** Arome Onoja / NatQuest Limited
-**License:** MIT
-**Platform:** [EigenCloud](https://eigencloud.xyz) (EigenCompute + EigenAI)
-
-**Scale:** 21-table intelligence database (schema v16) | Solidity contracts on Base | 14-page real-time dashboard | 4-stage review pipeline
-
----
-
-## The 3-Minute Demo
-
-A contributor opens a pull request against a SaltaX-managed repository. Here is what happens next — with no human involvement:
-
-1. **0s** — GitHub fires a webhook. SaltaX verifies the HMAC-SHA256 signature, deduplicates against previous deliveries, and checks for prompt injection in the PR body.
-2. **~2s** — The triage layer embeds the PR diff, runs cosine similarity against all open PRs (threshold 0.85), links it to the target issue, and scores it against the project's `vision.yaml`.
-3. **~10s** — Stage 1: Semgrep scans the diff for OWASP, supply-chain, and secret-leak patterns. A CRITICAL finding short-circuits the pipeline immediately.
-4. **~30s** — Stage 2: EigenAI analyzes code quality (1–10) and security risk (1–10). The inference call is **seed-pinned** (`int(commit_sha[:8], 16) % 2**32`) and authenticated via a wallet grant signature — no API key exists.
-5. **~5m** — Stage 3: Tests run in a sandboxed executor with a 512 MB memory cap. Exit code, coverage delta, and stdout/stderr are captured.
-6. **~5m 01s** — Stage 4: The decision engine computes a weighted score (0.25 × static + 0.25 × AI quality + 0.25 × AI security + 0.25 × tests). Score ≥ 0.75 → APPROVE. Score ≥ 0.50 → REQUEST_CHANGES. Below 0.50 → REJECT.
-7. **~5m 02s** — A **signed attestation proof** binds the Docker image digest, TEE platform ID, input hash, output hash, AI seed, and system fingerprint into a single EIP-191 signature. The proof chains to the previous attestation via `previous_attestation_id`.
-8. **+24h** — The optimistic verification window closes. No challenge was filed. SaltaX auto-merges the PR and pays the bounty from its autonomous treasury — one on-chain transaction, no human approval.
-
-The contributor earned ETH. SaltaX learned a new vulnerability pattern. The intelligence database grew. The cycle continues.
-
 ## What Is SaltaX?
 
 SaltaX is a **sovereign AI agent** — an ownerless, self-sustaining digital entity that autonomously maintains open-source software repositories. It is not a tool operated by a human. It is an independent organism that:
@@ -36,7 +13,7 @@ SaltaX is a **sovereign AI agent** — an ownerless, self-sustaining digital ent
 - **Owns a treasury** — an autonomous wallet controlled by no human
 - **Earns revenue** — from sponsorships, paid audits (via x402), and stake penalties
 - **Pays contributors** — instant, guaranteed bounty payments for verified work
-- **Builds private intelligence** — a TEE-sealed vulnerability knowledge base that appreciates over time
+- **Builds private intelligence** — a vulnerability knowledge base with feedback-driven confidence calibration that appreciates over time
 - **Proactively patrols** — scans dependencies for CVEs, re-audits codebases, issues bounties for discovered vulnerabilities
 - **Evolves itself** — merges PRs into its own source code through the same review pipeline it applies to external code
 
@@ -80,7 +57,7 @@ It is the first open-source maintainer that cannot be bribed, burned out, or com
     ║                  │                                         ║
     ║  ┌───────────────▼──────────────────────────────────────┐  ║
     ║  │       PRIVATE INTELLIGENCE DB                        │  ║
-    ║  │    (TEE-sealed, hardware-encrypted, schema v16)      │  ║
+    ║  │    (Supabase PostgreSQL, schema v17, 23 tables)      │  ║
     ║  │  Vuln Patterns │ PR Embeds │ Issue Embeds │ Vision   │  ║
     ║  │  Contributors  │ Attestations │ Bounties │ Windows   │  ║
     ║  └───────────────┬──────────────────────────────────────┘  ║
@@ -121,7 +98,7 @@ When a pull request is submitted to a SaltaX-managed repository:
 PR Submitted ──▶ Webhook Received ──▶ HMAC Verified ──▶ Triage ──▶ Pipeline
                                                            │
           ┌────────────────────────────────────────────────┘
-          │  Dedup check, issue linking, vision alignment
+          │  Dedup check, issue linking, vision alignment, custom rules loading
           │
     ┌─────▼─────────┐    ┌──────────────┐    ┌──────────────┐
     │ Stage 1:      │    │ Stage 2:     │    │ Stage 3:     │
@@ -130,8 +107,8 @@ PR Submitted ──▶ Webhook Received ──▶ HMAC Verified ──▶ Triage
     │               │    │              │    │              │
     │ OWASP, supply │    │ Quality 1-10 │    │ Exit code,   │
     │ chain, secrets│    │ Risk 1-10    │    │ coverage,    │
-    │               │    │ Seed-pinned  │    │ stdout/err   │
-    │               │    │ Grant auth   │    │              │
+    │ Path-scoped   │    │ Seed-pinned  │    │ stdout/err   │
+    │ custom rules  │    │ Custom rules │    │              │
     └───────────────┘    └──────────────┘    └──────────────┘
           │                    │                    │
           │    Short-circuit   │                    │
@@ -257,11 +234,39 @@ SaltaX is not a static program. It is a **closed-loop organism** that gets smart
                                                                    EARN ─┘
 ```
 
-**The intelligence database** (21 tables, schema v16) is TEE-sealed and hardware-encrypted. It stores vulnerability patterns, PR embeddings, issue embeddings, contributor profiles, attestation history, bounty records, codebase knowledge graphs, and vision alignment data. No human — including the deployer — can read it.
+**The intelligence database** (23 tables, schema v17) runs on Supabase PostgreSQL with psycopg3 async connection pooling. It stores vulnerability patterns, PR embeddings, issue embeddings, contributor profiles, attestation history, bounty records, codebase knowledge graphs, and vision alignment data. Access is restricted to the TEE container via Supavisor session-mode pooling.
+
+**Confidence calibration** turns human feedback into accuracy. GitHub emoji reactions on review comments (thumbs up = true positive, thumbs down = false positive) feed back into vulnerability pattern counters. Rules exceeding an 80% false-positive rate with sufficient signal are automatically suppressed. The system gets more accurate without retraining.
+
+**Codebase graph indexing** maps multi-language dependency structures (Python, JS/TS, Go, Rust) into an import graph with PageRank centrality scoring. High-centrality files receive more scrutiny during review — a bug in `core/auth.py` that 40 modules import is riskier than a bug in `scripts/cleanup.py`.
 
 **Patrol is the proactive arm.** SaltaX doesn't wait for PRs. On a configurable schedule, it scans managed repositories for dependency vulnerabilities (via OSV.dev), re-audits codebases with Semgrep, and automatically issues severity-calibrated bounties for discovered vulnerabilities. Every patrol cycle adds to the intelligence database, making the next cycle more informed.
 
 **Self-evolution** closes the loop. SaltaX can merge PRs that modify its own source code — through the same pipeline, with an elevated 0.90 approval threshold, a 72-hour verification window, `py_compile` health checks on 5 critical modules, and KMS-backed rollback if the health check fails. The organism upgrades itself.
+
+## Custom Review Rules
+
+Repository owners can define project-specific rules in `.saltax/rules.md`:
+
+```markdown
+## Scan Configuration
+**Scan_include:** src/**/*.py, lib/**/*.py
+**Scan_exclude:** vendor/**, generated/**
+
+## No raw SQL in API routes
+**Severity:** HIGH
+**Scope:** src/api/**/*.py, !src/api/tests/**
+**Description:** Use parameterized queries only. No f-strings in SQL.
+
+## Require error handling in handlers
+**Severity:** MEDIUM
+**Scope:** src/handlers/**/*.py
+**Description:** All handler functions must wrap async calls in try/except.
+```
+
+Rules support include/exclude glob patterns (`!` prefix for excludes, `**` for recursive matching). The scoping engine uses `PurePosixPath.full_match()` which correctly treats `*` as single-component (unlike `fnmatch` which crosses `/` boundaries).
+
+In the AI prompt, each rule shows exactly which changed files it applies to — not raw globs, but the resolved file list. `Scan_include`/`Scan_exclude` pass through to Semgrep's `--include`/`--exclude` CLI flags. Post-scan, findings are filtered to only files modified in the PR.
 
 ## Economic Design
 
@@ -354,7 +359,7 @@ Built with shadcn/ui, Tailwind CSS, and wagmi for wallet integration. Dark theme
 | **Autonomous PR Review** | Multi-stage pipeline: static scan + AI analysis + test execution + weighted verdict |
 | **Deterministic AI Inference** | Seed-pinned EigenAI calls produce bit-exact reproducible outputs for independent verification |
 | **Grant-Based Wallet Auth** | No API keys — EigenAI authentication via wallet signature on a challenge message (EIP-191) |
-| **Private Intelligence DB** | TEE-sealed SQLite (21 tables, schema v16) storing vulnerability patterns, contributor profiles, embeddings, treasury transactions, and codebase knowledge |
+| **Private Intelligence DB** | Supabase PostgreSQL (23 tables, schema v17) with psycopg3 async pooling, storing vulnerability patterns, contributor profiles, embeddings, treasury transactions, and codebase knowledge |
 | **Chained Attestation Proofs** | Domain-separated canonical JSON signed via EIP-191. Each proof links to its predecessor via `previous_attestation_id`. Captures Docker digest, TEE platform ID, I/O hashes, AI seed, system fingerprint. |
 | **Paid Audit Service** | x402-gated endpoint — external repos pay USDC for attested security analysis |
 | **Optimistic Verification** | 24h challenge window with dual-path dispute resolution (EigenVerify + MoltCourt) |
@@ -365,6 +370,13 @@ Built with shadcn/ui, Tailwind CSS, and wagmi for wallet integration. Dark theme
 | **Competitive Ranking** | Live ranking of competing PRs per issue, with labels and recommendation comments |
 | **Vision Alignment** | Score PRs against a project's `vision.yaml` for roadmap/architectural fit (up to 30% weight) |
 | **Autonomous Patrol** | Scheduled dependency vulnerability scanning (OSV.dev), codebase re-audits (Semgrep), bounty issuance for discovered vulnerabilities |
+| **Custom Review Rules** | Repository owners define rules in `.saltax/rules.md` with severity, scope patterns, and descriptions — injected into AI analysis with per-file applicability |
+| **Path-Scoped Rules** | Include/exclude glob patterns (`!tests/**`) with `PurePosixPath.full_match()`, Semgrep `--include`/`--exclude` flags, and post-scan filtering to changed files only |
+| **PR Summary Comments** | Visual verdict summaries with mermaid score waterfall charts, module dependency diagrams, file risk heatmaps, and attestation links — posted as a single comment that updates in-place on re-runs |
+| **Confidence Calibration** | Feedback-driven confidence scoring — GitHub emoji reactions (thumbs up/down) feed back into pattern accuracy, auto-suppressing rules that exceed 80% false-positive rate. Anti-gaming: 24h reaction window, 5-reaction/user/PR cap, `UNIQUE(pr_id, rule_id, github_user)` dedup |
+| **Codebase Graph Indexing** | Multi-language dependency graph (Python, JS/TS, Go, Rust) with PageRank centrality scoring, stored in the intelligence DB for context-aware risk analysis |
+| **Backfill Engine** | Resumable batch processing of existing PRs/issues with rate-limit-aware pagination — bootstrap intelligence from historical data without re-triggering webhooks |
+| **Vector Similarity Index** | In-process HNSW index for sub-linear cosine similarity search across PR and issue embeddings, with auto-enable heuristic (activates when embedding count exceeds linear-scan threshold) |
 | **Advisory Mode** | Human-in-the-loop mode: recommends actions via comments/labels without auto-merging |
 | **On-Chain Treasury** | Solidity contracts enforce fiscal policy (reserve ratio, bounty cap, max payout) mirroring Python policy engine — defense in depth |
 
@@ -372,19 +384,19 @@ Built with shadcn/ui, Tailwind CSS, and wagmi for wallet integration. Dark theme
 
 | Layer | Technology |
 |---|---|
-| **Core Runtime** | Python 3.11+ (asyncio) |
+| **Core Runtime** | Python 3.11+ (asyncio, tested up to 3.14) |
 | **HTTP Server** | FastAPI + Uvicorn |
 | **GitHub Integration** | TypeScript proxy (Node 22, Octokit) + Python client (httpx, PyJWT) |
 | **AI Inference** | EigenAI (OpenAI-compatible API, deterministic seed pinning, grant-based wallet auth) |
 | **Static Analysis** | Semgrep (security-audit, OWASP, supply-chain rulesets) |
-| **Intelligence DB** | aiosqlite (WAL mode, TEE-sealed via EigenCloud KMS) |
+| **Intelligence DB** | Supabase PostgreSQL (psycopg3, AsyncConnectionPool, Supavisor session mode) |
 | **Blockchain** | web3.py (Base for treasury/staking, Ethereum Sepolia for identity) |
 | **Smart Contracts** | Solidity (Foundry), deployed to Base |
 | **Identity** | ERC-8004 via Agent0 SDK (Node.js bridge) |
 | **Payments** | x402 protocol (HTTP-native stablecoin micropayments) |
 | **Dashboard** | Next.js 16, TypeScript, shadcn/ui, Tailwind CSS, wagmi |
 | **WebSocket** | Live log streaming from backend to dashboard |
-| **Containerization** | Docker (multi-stage: Node 22 + Python 3.11-slim) |
+| **Containerization** | Docker (multi-stage: Node 22 + Python 3.11-slim production image) |
 | **TEE** | Intel TDX on EigenCompute |
 | **Testing** | pytest + pytest-asyncio + respx (Python), Vitest + Playwright (frontend) |
 | **Linting** | Ruff (E, F, I, N, W, UP, B, SIM, TCH rules) |
@@ -502,7 +514,7 @@ SaltaX initializes through a 5-phase ordered sequence:
 
 1. **Configuration** — load `saltax.config.yaml` + `.env`, cross-validate 11 constraint rules
 2. **Cryptographic Identity** — KMS initialization, wallet generation (3-path priority: mnemonic → KMS unseal → fresh keypair), ERC-8004 identity registration
-3. **State Recovery** — open and unseal the intelligence database (schema v16, 21 tables)
+3. **State Recovery** — connect to the intelligence database (Supabase PostgreSQL, schema v17, 23 tables)
 4. **Build Connections** — wire the analysis pipeline, GitHub client, verification scheduler, patrol scheduler, dispute router, treasury manager
 5. **Start Services** — launch FastAPI server, verification scheduler, TypeScript proxy (with crash detection), patrol scheduler
 
@@ -543,7 +555,7 @@ If any phase fails, resources are torn down in reverse order and the process exi
 
 ```
 saltaX/
-├── src/                                 # Python backend (22,500 lines)
+├── src/                                 # Python backend (25,000 lines)
 │   ├── main.py                          # 5-phase bootstrap, signal handling, graceful shutdown
 │   ├── config.py                        # SaltaXConfig (YAML) + EnvConfig (pydantic-settings)
 │   ├── security/                        # URL validation, token scrubbing, prompt injection detection
@@ -567,6 +579,9 @@ saltaX/
 │   ├── verification/                    # Optimistic verification scheduler, window state machine
 │   ├── selfmerge/                       # Self-modification detection, health check, KMS rollback
 │   ├── attestation/                     # TEE attestation engine, store, verifier
+│   ├── rules/                           # Custom review rules: loader, models, scoping engine, prompt formatter
+│   ├── feedback/                        # Confidence calibration from GitHub emoji reactions
+│   ├── indexing/                        # Multi-language dependency graph indexing with PageRank
 │   ├── triage/                          # PR dedup, issue dedup, ranking, vision alignment, advisory
 │   ├── patrol/                          # Dependency audit, codebase scan, bounty issuer, OSV client
 │   ├── staking/                         # Contract interaction, economics, resolver
@@ -615,7 +630,7 @@ SaltaX handles concurrent webhooks, scheduled verification, dispute polling, and
 | Lock / Mechanism | Purpose |
 |---|---|
 | `WalletManager._tx_lock` | Serializes all on-chain transactions to prevent nonce interleaving |
-| `IntelligenceDB._write_lock` | Serializes all database writes to prevent transaction interleaving on shared aiosqlite connection |
+| `AsyncConnectionPool` (psycopg3) | Connection pooling (min=2, max=10) with PostgreSQL MVCC — no application-level write lock needed |
 | `_analysis_semaphore` | Limits concurrent AI analyses to 5 (prevents OOM) |
 | Verification scheduler | Event-driven loop with `asyncio.Event` for clean shutdown |
 | TS proxy monitor | `asyncio.Task` with 5-second polling, restart-on-crash (up to 3 retries) |

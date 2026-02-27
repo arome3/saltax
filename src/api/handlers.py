@@ -283,12 +283,101 @@ async def handle_pr_event(
                     extra={"pr_id": pr_data.get("pr_id")},
                 )
 
+        # ── Load custom review rules ─────────────────────────────────
+        if config.rules.enabled:
+            try:
+                from src.rules.cache import cache_rules, get_cached_rules  # noqa: PLC0415
+                from src.rules.loader import load_rules_for_repo  # noqa: PLC0415
+
+                cached = get_cached_rules(repo, config.rules.cache_ttl_seconds)
+                if cached is not None:
+                    ruleset = cached
+                else:
+                    ruleset = await load_rules_for_repo(
+                        repo=repo,
+                        installation_id=installation_id,
+                        github_client=github_client,
+                        rules_config=config.rules,
+                    )
+                    if ruleset is not None:
+                        cache_rules(repo, ruleset)
+
+                if ruleset is not None and ruleset.active_rules:
+                    from src.rules.prompt import format_rules_for_prompt  # noqa: PLC0415
+                    from src.selfmerge.detector import extract_modified_files  # noqa: PLC0415
+
+                    changed_files = list(extract_modified_files(diff))
+                    rules_text = format_rules_for_prompt(
+                        ruleset,
+                        changed_files,
+                        max_chars=config.rules.max_prompt_chars,
+                    )
+                    if rules_text:
+                        state_dict["custom_rules_text"] = rules_text
+                if ruleset is not None:
+                    if ruleset.scan_include:
+                        state_dict["scan_include"] = ruleset.scan_include
+                    if ruleset.scan_exclude:
+                        state_dict["scan_exclude"] = ruleset.scan_exclude
+            except GitHubRateLimitError:
+                logger.warning(
+                    "Custom rules load skipped: rate limit",
+                    extra={"pr_id": pr_data.get("pr_id"), "repo": repo},
+                )
+            except Exception:
+                logger.warning(
+                    "Custom rules load failed, continuing",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
+
         state = await pipeline.run(state_dict)
 
         logger.info(
             "Pipeline completed for PR",
             extra={"pr_id": pr_data["pr_id"], "action": action},
         )
+
+        # ── Post visual summary comment ──────────────────────────
+        if state.verdict:
+            try:
+                from src.github.summary import (  # noqa: PLC0415
+                    build_pr_summary,
+                    post_or_update_summary,
+                )
+
+                attestation = state.attestation or {}
+                summary_body = build_pr_summary(
+                    repo=repo,
+                    pr_number=pr_number,
+                    diff=state.diff,
+                    static_findings=state.static_findings,
+                    ai_analysis=state.ai_analysis,
+                    test_results=state.test_results,
+                    verdict=state.verdict,
+                    attestation_id=str(attestation.get("attestation_id", "")),
+                    codebase_knowledge=await intel_db.list_codebase_knowledge(repo),
+                    vision_score=(
+                        state.ai_analysis.get("vision_alignment_score")
+                        if state.ai_analysis
+                        else None
+                    ),
+                    score_breakdown=state.verdict.get("score_breakdown"),
+                )
+
+                await post_or_update_summary(
+                    repo=repo,
+                    pr_number=pr_number,
+                    installation_id=installation_id,
+                    summary_body=summary_body,
+                    github_client=github_client,
+                )
+            except Exception:
+                logger.warning(
+                    "PR summary posting failed, continuing",
+                    exc_info=True,
+                    extra={"pr_id": pr_data.get("pr_id")},
+                )
 
         # ── Triage: competitive ranking ──────────────────────────
         if (

@@ -52,6 +52,17 @@ class _LangConfig:
 
 _LANGUAGES: tuple[_LangConfig, ...] = (
     _LangConfig(
+        name="python",
+        detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
+        install_cmd=["pip", "install", "-e", ".[test]", "pytest-timeout", "--quiet"],
+        install_fallback=["pip", "install", "-e", ".", "pytest-timeout", "--quiet"],
+        test_cmd=[
+            "python", "-m", "pytest", "--tb=short", "-q",
+            "--ignore=tests/integration", "--ignore=tests/e2e",
+            "--timeout=30",
+        ],
+    ),
+    _LangConfig(
         name="nodejs",
         detect_files=("package.json",),
         install_cmd=["npm", "ci", "--ignore-scripts"],
@@ -64,13 +75,6 @@ _LANGUAGES: tuple[_LangConfig, ...] = (
         install_cmd=["cargo", "fetch"],
         install_fallback=None,
         test_cmd=["cargo", "test"],
-    ),
-    _LangConfig(
-        name="python",
-        detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
-        install_cmd=["pip", "install", "-e", ".[test]", "--quiet"],
-        install_fallback=["pip", "install", "-e", ".", "--quiet"],
-        test_cmd=["python", "-m", "pytest", "--tb=short", "-q"],
     ),
 )
 
@@ -100,6 +104,7 @@ async def run_tests(state: PipelineState, config: SaltaXConfig) -> None:
             _clone_repo(state.repo_url, state.head_branch, repo_dir),
             timeout=_CLONE_TIMEOUT,
         )
+        logger.info("Clone completed in %.1fs", time.monotonic() - t0)
 
         lang = _detect_language(repo_dir)
         if lang is None:
@@ -111,9 +116,13 @@ async def run_tests(state: PipelineState, config: SaltaXConfig) -> None:
             return
 
         mem_mb = config.pipeline.test_executor_memory_mb
+        t_install = time.monotonic()
         await _install_deps(lang, repo_dir, tmp_dir, memory_mb=mem_mb)
+        logger.info("Install completed in %.1fs", time.monotonic() - t_install)
 
+        t_test = time.monotonic()
         result = await _run_test_suite(lang, repo_dir, tmp_dir, config)
+        logger.info("Test suite completed in %.1fs", time.monotonic() - t_test)
         state.test_results = result.model_dump()
 
         elapsed = time.monotonic() - t0
@@ -279,7 +288,9 @@ async def _run_test_suite(
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        preexec_fn=_set_resource_limits(config.pipeline.test_executor_memory_mb),
+        # No RLIMIT_AS here — shared libraries (NumPy/OpenBLAS) can require
+        # >1 GB of virtual address space for memory-mapped .so files.  The
+        # asyncio.wait_for timeout already guards against runaway processes.
     )
     try:
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -305,6 +316,11 @@ async def _run_test_suite(
     coverage = _parse_coverage(lang.name, combined)
     total = passed_count + failed_count + skipped_count
     rc = proc.returncode or 0
+
+    # Log output tail when tests fail or zero tests collected for debugging
+    if rc != 0 or total == 0:
+        logger.info("Test exit_code=%d, stdout_tail: %s", rc, stdout_text[-500:])
+        logger.info("Test stderr_tail: %s", stderr_text[-500:])
 
     return TestResult(
         passed=rc == 0 and failed_count == 0 and total > 0,
@@ -361,12 +377,18 @@ def _smart_truncate(text: str, max_len: int) -> str:
 
 
 def _subprocess_env(tmp_dir: str) -> dict[str, str]:
-    """Build a minimal, isolated environment for subprocess execution."""
+    """Build a minimal, isolated environment for subprocess execution.
+
+    ``PGCONNECT_TIMEOUT`` makes libpq fail fast when no PostgreSQL server is
+    reachable, preventing test suites from hanging on ``AsyncConnectionPool``
+    open attempts in the sandbox.
+    """
     return {
         "HOME": tmp_dir,
         "CI": "true",
         "NODE_ENV": "test",
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PGCONNECT_TIMEOUT": "3",
     }
 
 
@@ -375,10 +397,11 @@ def _subprocess_env(tmp_dir: str) -> dict[str, str]:
 # Jest / Vitest: flexible pair-matching for any status order
 _JEST_SUMMARY_LINE_RE = re.compile(r"Tests:?\s+(.+)")
 _JEST_PAIR_RE = re.compile(r"(\d+)\s+(failed|passed|skipped|pending|todo|total)")
-# Pytest: "18 passed, 2 failed, 1 skipped"
+# Pytest: "18 passed, 2 failed, 1 skipped, 3 errors"
 _PYTEST_PASSED_RE = re.compile(r"(\d+)\s+passed")
 _PYTEST_FAILED_RE = re.compile(r"(\d+)\s+failed")
 _PYTEST_SKIPPED_RE = re.compile(r"(\d+)\s+skipped")
+_PYTEST_ERRORS_RE = re.compile(r"(\d+)\s+errors?")
 # Cargo: "test result: ok. 18 passed; 0 failed; 1 ignored"
 _CARGO_RESULT_RE = re.compile(
     r"test result:\s+\w+\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored",
@@ -419,9 +442,13 @@ def _parse_jest_counts(output: str) -> tuple[int, int, int]:
 
 
 def _parse_pytest_counts(output: str) -> tuple[int, int, int]:
-    """Parse pytest summary line."""
+    """Parse pytest summary line.
+
+    Pytest "errors" (fixture/collection failures) are counted as failed
+    tests because they represent tests that could not execute.
+    """
     passed = _first_int(_PYTEST_PASSED_RE, output)
-    failed = _first_int(_PYTEST_FAILED_RE, output)
+    failed = _first_int(_PYTEST_FAILED_RE, output) + _first_int(_PYTEST_ERRORS_RE, output)
     skipped = _first_int(_PYTEST_SKIPPED_RE, output)
     return (passed, failed, skipped)
 

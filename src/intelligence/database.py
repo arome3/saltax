@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 # ── Module constants ─────────────────────────────────────────────────────────
 
 _FP_THRESHOLD = 0.8
+_MIN_FEEDBACK_FOR_SUPPRESSION = 5
 _MIN_VERDICTS_FOR_HISTORY = 5
-_CURRENT_SCHEMA_VERSION = 16
+_CURRENT_SCHEMA_VERSION = 17
 _MAX_LIKE_TOKENS = 20
 
 _SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -54,11 +55,13 @@ class IntelligenceDB:
         *,
         pool_min_size: int = 2,
         pool_max_size: int = 10,
+        pool_timeout: float = 30.0,
     ) -> None:
         self._database_url = database_url
         self._pool: AsyncConnectionPool | None = None
         self._pool_min_size = pool_min_size
         self._pool_max_size = pool_max_size
+        self._pool_timeout = pool_timeout
         self._initialized = False
 
     @property
@@ -102,7 +105,9 @@ class IntelligenceDB:
             conninfo=self._database_url,
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
+            timeout=self._pool_timeout,
             kwargs={"autocommit": True, "row_factory": dict_row},
+            open=False,
         )
         try:
             await self._pool.open()
@@ -167,17 +172,69 @@ class IntelligenceDB:
 
         Uses DefectDojo-style integer counters: FP rate is computed
         dynamically from ``confirmed_true_positive`` / ``confirmed_false_positive``.
+
+        A minimum of ``_MIN_FEEDBACK_FOR_SUPPRESSION`` total signals is
+        required before a rule can be suppressed.  This prevents premature
+        suppression from a handful of noisy reactions.
         """
         pool = self._require_pool()
         sql = """\
             SELECT DISTINCT rule_id FROM vulnerability_patterns
             WHERE confirmed_false_positive > 0
+              AND (confirmed_true_positive + confirmed_false_positive) >= %s
               AND CAST(confirmed_false_positive AS REAL) /
                   (confirmed_true_positive + confirmed_false_positive) > %s
         """
         async with pool.connection() as conn:
-            rows = await (await conn.execute(sql, (_FP_THRESHOLD,))).fetchall()
+            rows = await (
+                await conn.execute(sql, (_MIN_FEEDBACK_FOR_SUPPRESSION, _FP_THRESHOLD))
+            ).fetchall()
             return frozenset(row["rule_id"] for row in rows)
+
+    async def get_rule_feedback_stats(self, rule_id: str) -> dict[str, int] | None:
+        """Return TP/FP counts for a rule_id.
+
+        Returns ``None`` if no pattern matches.  When multiple patterns
+        share the same ``rule_id``, returns the one with the highest
+        ``times_seen`` (most representative).
+        """
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT confirmed_true_positive, confirmed_false_positive "
+                    "FROM vulnerability_patterns WHERE rule_id = %s "
+                    "ORDER BY times_seen DESC LIMIT 1",
+                    (rule_id,),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "confirmed_true_positive": row["confirmed_true_positive"],
+                "confirmed_false_positive": row["confirmed_false_positive"],
+            }
+
+    async def get_confidence_stats(self) -> list[dict[str, object]]:
+        """Return aggregate confidence metrics grouped by source_stage.
+
+        No repo parameter — ``vulnerability_patterns`` has no repo column.
+        Returns one dict per source_stage with avg confidence, total count,
+        and TP/FP sums.
+        """
+        pool = self._require_pool()
+        sql = """\
+            SELECT source_stage,
+                   AVG(confidence) AS avg_confidence,
+                   COUNT(*) AS total_patterns,
+                   SUM(confirmed_true_positive) AS total_tp,
+                   SUM(confirmed_false_positive) AS total_fp
+            FROM vulnerability_patterns
+            GROUP BY source_stage
+        """
+        async with pool.connection() as conn:
+            rows = await (await conn.execute(sql)).fetchall()
+            return [dict(row) for row in rows]
 
     async def query_similar_patterns(
         self, code_diff: str, limit: int = 10,
@@ -247,6 +304,52 @@ class IntelligenceDB:
                     "WHERE id = %s",
                     (pattern_id,),
                 )
+
+    async def record_feedback_signal(
+        self,
+        rule_id: str,
+        repo: str,
+        pr_number: int,
+        comment_id: int,
+        reactor_login: str,
+        reaction: str,
+    ) -> bool:
+        """Record a feedback signal from a GitHub reaction.
+
+        Inserts a row into ``feedback_log`` and increments the appropriate
+        counter (TP or FP) on all ``vulnerability_patterns`` matching
+        *rule_id*.  Uses ``ON CONFLICT DO NOTHING`` for idempotency.
+
+        Returns ``True`` if a new signal was recorded, ``False`` if the
+        signal was a duplicate (already recorded for this rule/repo/PR/
+        reactor/reaction combination).
+        """
+        pool = self._require_pool()
+        signal_id = uuid.uuid4().hex
+
+        async with pool.connection() as conn, conn.transaction():
+            cur = await conn.execute(
+                "INSERT INTO feedback_log "
+                "(id, rule_id, repo, pr_number, comment_id, reactor_login, reaction) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT DO NOTHING",
+                (signal_id, rule_id, repo, pr_number, comment_id, reactor_login, reaction),
+            )
+            if cur.rowcount == 0:
+                return False
+
+            counter_col = (
+                "confirmed_true_positive"
+                if reaction == "+1"
+                else "confirmed_false_positive"
+            )
+            await conn.execute(
+                f"UPDATE vulnerability_patterns "  # noqa: S608
+                f"SET {counter_col} = {counter_col} + 1 "
+                "WHERE rule_id = %s",
+                (rule_id,),
+            )
+        return True
 
     # ── Ingestion ────────────────────────────────────────────────────────
 
@@ -1149,6 +1252,20 @@ class IntelligenceDB:
                 """,
                 (knowledge_id, repo, file_path, knowledge, now),
             )
+
+    async def delete_stale_codebase_knowledge(self, repo: str, before: str) -> int:
+        """Delete codebase knowledge entries for a repo updated before the given ISO timestamp.
+
+        Returns the number of deleted rows.  Used after re-indexing to remove
+        entries for files that no longer exist in the repo.
+        """
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                "DELETE FROM codebase_knowledge WHERE repo = %s AND updated_at < %s",
+                (repo, before),
+            )
+            return result.rowcount
 
     # ── Vision documents ─────────────────────────────────────────────────
 

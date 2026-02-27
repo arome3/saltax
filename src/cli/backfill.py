@@ -53,6 +53,7 @@ async def _run_backfill(
         database_url=env.database_url,
         pool_min_size=config.database.pool_min_size,
         pool_max_size=config.database.pool_max_size,
+        pool_timeout=config.database.pool_timeout,
     )
     github_client = GitHubClient(
         app_id=env.github_app_id,

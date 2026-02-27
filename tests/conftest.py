@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -19,6 +20,34 @@ _TEST_DATABASE_URL = os.environ.get(
 )
 
 # ---------------------------------------------------------------------------
+# DB availability check — skip DB tests when no PostgreSQL is reachable
+# ---------------------------------------------------------------------------
+_DB_FIXTURE_NAMES = frozenset({"mock_intel_db", "intel_db"})
+
+
+def _is_db_reachable() -> bool:
+    """Quick TCP probe to the test database port."""
+    try:
+        s = socket.create_connection(("localhost", 5432), timeout=2)
+        s.close()
+        return True
+    except (OSError, ConnectionRefusedError, TimeoutError):
+        return False
+
+
+_DB_AVAILABLE = _is_db_reachable()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark DB-dependent tests for skipping when no database is available."""
+    if _DB_AVAILABLE:
+        return
+    skip_marker = pytest.mark.skip(reason="Database not reachable at localhost:5432")
+    for item in items:
+        if _DB_FIXTURE_NAMES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(skip_marker)
+
+# ---------------------------------------------------------------------------
 # Valid YAML content matching the production saltax.config.yaml structure
 # ---------------------------------------------------------------------------
 VALID_YAML = textwrap.dedent("""\
@@ -31,7 +60,7 @@ VALID_YAML = textwrap.dedent("""\
     database:
       pool_min_size: 2
       pool_max_size: 10
-      pool_timeout: 30.0
+      pool_timeout: 3.0
       statement_timeout_ms: 30000
 
     pipeline:
@@ -51,13 +80,13 @@ VALID_YAML = textwrap.dedent("""\
         test_executor:
           enabled: true
           timeout_seconds: 300
-          memory_limit_mb: 512
+          memory_limit_mb: 2048
         decision_engine:
           weights:
-            static_clear: 0.25
-            ai_quality: 0.25
-            ai_security: 0.25
-            tests_pass: 0.25
+            static_clear: 0.35
+            ai_quality: 0.05
+            ai_security: 0.05
+            tests_pass: 0.55
 
     treasury:
       reserve_ratio: 0.20
@@ -158,6 +187,9 @@ VALID_YAML = textwrap.dedent("""\
           MEDIUM: "bounty-md"
           LOW: "bounty-sm"
         max_open_bounties_per_repo: 10
+
+    feedback:
+      enabled: true
 """)
 
 # ---------------------------------------------------------------------------
@@ -255,6 +287,7 @@ def mock_github_client() -> AsyncMock:
     client.create_comment = AsyncMock(return_value=None)
     client.merge_pr = AsyncMock(return_value={"merged": True})
     client.add_labels = AsyncMock(return_value=None)
+    client.get_comment_reactions = AsyncMock(return_value=[])
     # CI gate defaults — no external CI → NO_CI → merge proceeds
     client.get_pr = AsyncMock(return_value={"head": {"sha": "abc123"}})
     client.list_check_runs_for_ref = AsyncMock(return_value=[])

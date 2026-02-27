@@ -219,6 +219,20 @@ async def github_webhook(
                     ),
                 )
 
+            if pr_data["action"] == "closed" and pr_data.get("installation_id"):
+                from src.feedback.reaction_handler import collect_reactions_for_pr  # noqa: PLC0415
+
+                feedback_cfg = getattr(request.app.state.config, "feedback", None)
+                background_tasks.add_task(
+                    collect_reactions_for_pr,
+                    repo=pr_data["repo_full_name"],
+                    pr_number=pr_data["pr_number"],
+                    installation_id=pr_data["installation_id"],
+                    github_client=request.app.state.github_client,
+                    intel_db=request.app.state.intel_db,
+                    enabled=feedback_cfg.enabled if feedback_cfg else True,
+                )
+
             return Response(status_code=200, content="OK")
 
         if event_type == "issues":

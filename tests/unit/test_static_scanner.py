@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import os
-
 import asyncio
 import json
+import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -36,6 +35,9 @@ _TEST_DATABASE_URL = os.environ.get(
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 _MODULE = "src.pipeline.stages.static_scanner"
+
+# Diff whose changed file matches the default finding path (src/db.py)
+_DIFF_WITH_DB_PY = "diff --git a/src/db.py b/src/db.py\n+pass"
 
 
 def _make_config() -> SaltaXConfig:
@@ -370,7 +372,7 @@ class TestRunStaticScan:
         assert state.short_circuit is False
 
     async def test_findings_parsed_and_stored_as_dicts(self) -> None:
-        state = _make_state()
+        state = _make_state(diff=_DIFF_WITH_DB_PY)
         config = _make_config()
         intel_db = _make_intel_db()
 
@@ -395,7 +397,7 @@ class TestRunStaticScan:
         assert state.static_findings[0]["severity"] == "HIGH"
 
     async def test_critical_triggers_short_circuit(self) -> None:
-        state = _make_state()
+        state = _make_state(diff=_DIFF_WITH_DB_PY)
         config = _make_config()
         intel_db = _make_intel_db()
 
@@ -417,7 +419,7 @@ class TestRunStaticScan:
         assert state.short_circuit is True
 
     async def test_six_high_triggers_short_circuit(self) -> None:
-        state = _make_state()
+        state = _make_state(diff=_DIFF_WITH_DB_PY)
         config = _make_config()
         intel_db = _make_intel_db()
 
@@ -530,7 +532,7 @@ class TestRunStaticScan:
         assert state.short_circuit is False
 
     async def test_false_positive_filtering(self) -> None:
-        state = _make_state()
+        state = _make_state(diff=_DIFF_WITH_DB_PY)
         config = _make_config()
         intel_db = _make_intel_db()
         intel_db.get_false_positive_signatures = AsyncMock(  # type: ignore[method-assign]
@@ -564,7 +566,7 @@ class TestRunStaticScan:
 
     async def test_intel_db_failure_preserves_findings(self) -> None:
         """If intel_db raises, findings are kept (not silently dropped)."""
-        state = _make_state()
+        state = _make_state(diff=_DIFF_WITH_DB_PY)
         config = _make_config()
         intel_db = _make_intel_db()
         intel_db.get_false_positive_signatures = AsyncMock(  # type: ignore[method-assign]

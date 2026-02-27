@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from src.feedback.confidence import _safe_confidence, confidence_badge_compact
 from src.github.comments import escape_cell
 
 if TYPE_CHECKING:
@@ -24,6 +25,8 @@ if TYPE_CHECKING:
     from src.pipeline.state import PipelineState
 
 logger = logging.getLogger(__name__)
+
+_MAX_ADVISORY_FINDINGS = 20
 
 
 # -- Body builder -------------------------------------------------------------
@@ -120,7 +123,59 @@ def _build_advisory_body(state: PipelineState) -> str:
     else:
         lines.append("| Tests | N/A |")
 
+    # Include test output when tests fail or no tests found (for debugging)
+    if total is not None and (not passed or total == 0):
+        stderr_tail = (tests.get("stderr_tail") or "")[-500:]
+        stdout_tail = (tests.get("stdout_tail") or "")[-500:]
+        if stderr_tail or stdout_tail:
+            lines.append("")
+            lines.append("<details><summary>Test output (last 500 chars)</summary>")
+            lines.append("")
+            if stdout_tail:
+                lines.append(f"**stdout:** `{stdout_tail}`")
+            if stderr_tail:
+                lines.append(f"**stderr:** `{stderr_tail}`")
+            lines.append("")
+            lines.append("</details>")
+
     lines.append("")
+
+    # Findings detail section (with confidence)
+    all_findings: list[dict[str, object]] = list(state.static_findings)
+    ai_data = state.ai_analysis or {}
+    ai_findings = ai_data.get("findings", [])
+    if isinstance(ai_findings, list):
+        for af in ai_findings:
+            if isinstance(af, dict):
+                all_findings.append(af)
+
+    if all_findings:
+        lines.extend([
+            "### Findings",
+            "",
+            "| Severity | File | Message | Confidence |",
+            "|----------|------|---------|------------|",
+        ])
+        sorted_f = sorted(
+            all_findings,
+            key=lambda f: _safe_confidence(f.get("confidence")) or 0.0,
+            reverse=True,
+        )
+        for f in sorted_f[:_MAX_ADVISORY_FINDINGS]:
+            sev = str(f.get("severity", "MEDIUM"))
+            fp = f.get("file_path", "unknown")
+            msg = str(f.get("message", ""))[:80]
+            conf_val = _safe_confidence(f.get("confidence"))
+            tier = confidence_badge_compact(conf_val) if conf_val is not None else "\u2014"
+            lines.append(
+                f"| {escape_cell(sev)} | `{escape_cell(str(fp))}` "
+                f"| {escape_cell(msg)} | {tier} |"
+            )
+        if len(all_findings) > _MAX_ADVISORY_FINDINGS:
+            lines.append(
+                f"\n*\u2026 and {len(all_findings) - _MAX_ADVISORY_FINDINGS} more findings.*"
+            )
+        lines.append("")
 
     # Duplicates section
     if state.duplicate_candidates:
@@ -148,6 +203,22 @@ def _build_advisory_body(state: PipelineState) -> str:
         "---",
         f"*SaltaX attestation: `{attestation_id}`*",
     ])
+
+    # Embed rule_id markers for feedback learning (invisible HTML comment)
+    rule_ids_set: set[str] = set()
+    for f in state.static_findings:
+        rid = f.get("rule_id")
+        if rid:
+            rule_ids_set.add(str(rid))
+    if state.ai_analysis:
+        ai_findings = state.ai_analysis.get("findings", [])
+        if isinstance(ai_findings, list):
+            for f in ai_findings:
+                rid = f.get("rule_id") if isinstance(f, dict) else None
+                if rid:
+                    rule_ids_set.add(str(rid))
+    if rule_ids_set:
+        lines.append(f"<!-- saltax-findings:{','.join(sorted(rule_ids_set))} -->")
 
     return "\n".join(lines)
 
