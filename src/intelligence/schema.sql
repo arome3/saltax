@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS codebase_knowledge (
     updated_at  TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_ck_repo_filepath ON codebase_knowledge(repo, file_path);
+
 -- ── Pipeline history ────────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS pipeline_history (

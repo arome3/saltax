@@ -55,11 +55,13 @@ class IntelligenceDB:
         *,
         pool_min_size: int = 2,
         pool_max_size: int = 10,
+        pool_timeout: float = 30.0,
     ) -> None:
         self._database_url = database_url
         self._pool: AsyncConnectionPool | None = None
         self._pool_min_size = pool_min_size
         self._pool_max_size = pool_max_size
+        self._pool_timeout = pool_timeout
         self._initialized = False
 
     @property
@@ -103,6 +105,7 @@ class IntelligenceDB:
             conninfo=self._database_url,
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
+            timeout=self._pool_timeout,
             kwargs={"autocommit": True, "row_factory": dict_row},
             open=False,
         )
@@ -187,6 +190,51 @@ class IntelligenceDB:
                 await conn.execute(sql, (_MIN_FEEDBACK_FOR_SUPPRESSION, _FP_THRESHOLD))
             ).fetchall()
             return frozenset(row["rule_id"] for row in rows)
+
+    async def get_rule_feedback_stats(self, rule_id: str) -> dict[str, int] | None:
+        """Return TP/FP counts for a rule_id.
+
+        Returns ``None`` if no pattern matches.  When multiple patterns
+        share the same ``rule_id``, returns the one with the highest
+        ``times_seen`` (most representative).
+        """
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT confirmed_true_positive, confirmed_false_positive "
+                    "FROM vulnerability_patterns WHERE rule_id = %s "
+                    "ORDER BY times_seen DESC LIMIT 1",
+                    (rule_id,),
+                )
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "confirmed_true_positive": row["confirmed_true_positive"],
+                "confirmed_false_positive": row["confirmed_false_positive"],
+            }
+
+    async def get_confidence_stats(self) -> list[dict[str, object]]:
+        """Return aggregate confidence metrics grouped by source_stage.
+
+        No repo parameter — ``vulnerability_patterns`` has no repo column.
+        Returns one dict per source_stage with avg confidence, total count,
+        and TP/FP sums.
+        """
+        pool = self._require_pool()
+        sql = """\
+            SELECT source_stage,
+                   AVG(confidence) AS avg_confidence,
+                   COUNT(*) AS total_patterns,
+                   SUM(confirmed_true_positive) AS total_tp,
+                   SUM(confirmed_false_positive) AS total_fp
+            FROM vulnerability_patterns
+            GROUP BY source_stage
+        """
+        async with pool.connection() as conn:
+            rows = await (await conn.execute(sql)).fetchall()
+            return [dict(row) for row in rows]
 
     async def query_similar_patterns(
         self, code_diff: str, limit: int = 10,
@@ -1204,6 +1252,20 @@ class IntelligenceDB:
                 """,
                 (knowledge_id, repo, file_path, knowledge, now),
             )
+
+    async def delete_stale_codebase_knowledge(self, repo: str, before: str) -> int:
+        """Delete codebase knowledge entries for a repo updated before the given ISO timestamp.
+
+        Returns the number of deleted rows.  Used after re-indexing to remove
+        entries for files that no longer exist in the repo.
+        """
+        pool = self._require_pool()
+        async with pool.connection() as conn:
+            result = await conn.execute(
+                "DELETE FROM codebase_knowledge WHERE repo = %s AND updated_at < %s",
+                (repo, before),
+            )
+            return result.rowcount
 
     # ── Vision documents ─────────────────────────────────────────────────
 

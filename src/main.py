@@ -46,6 +46,7 @@ from src.intelligence.sealing import KMSSealManager
 from src.intelligence.vector_index import VectorIndexManager, maybe_enable_vector_index
 from src.observability import configure_logging
 from src.observability.metrics import BudgetTracker
+from src.indexing.scheduler import IndexingScheduler
 from src.patrol.scheduler import PatrolScheduler
 from src.pipeline.runner import build_pipeline
 from src.staking import StakeResolver, StakingContract, StakingEconomics
@@ -225,6 +226,8 @@ async def _graceful_shutdown(
     ts_proxy: TSProxyManager,
     patrol_scheduler: PatrolScheduler | None = None,
     patrol_scheduler_task: asyncio.Task[None] | None = None,
+    indexing_scheduler: IndexingScheduler | None = None,
+    indexing_scheduler_task: asyncio.Task[None] | None = None,
     timeout: float = _SHUTDOWN_TIMEOUT,
 ) -> None:
     """Execute the ordered shutdown sequence with a timeout.
@@ -237,6 +240,13 @@ async def _graceful_shutdown(
     try:
         async with asyncio.timeout(timeout):
             server.should_exit = True
+
+            # Stop indexing scheduler first (lowest priority, independent).
+            if indexing_scheduler is not None:
+                try:
+                    await indexing_scheduler.close()
+                except Exception:
+                    logger.exception("Error stopping indexing scheduler")
 
             # Stop patrol BEFORE dispute_scheduler (patrol creates work that
             # dispute processes).
@@ -289,6 +299,7 @@ async def _graceful_shutdown(
             t for t in (
                 server_task, scheduler_task,
                 dispute_scheduler_task, patrol_scheduler_task,
+                indexing_scheduler_task,
             )
             if t is not None
         )
@@ -359,6 +370,7 @@ async def bootstrap() -> None:  # noqa: C901
             database_url=env.database_url,
             pool_min_size=config.database.pool_min_size,
             pool_max_size=config.database.pool_max_size,
+            pool_timeout=config.database.pool_timeout,
         )
         await intel_db.initialize()
         resources.append(("intel_db", intel_db))
@@ -465,6 +477,12 @@ async def bootstrap() -> None:  # noqa: C901
             )
             resources.append(("patrol_scheduler", patrol_scheduler))
 
+        # Indexing scheduler (codebase graph building)
+        indexing_scheduler: IndexingScheduler | None = None
+        if config.indexing.enabled:
+            indexing_scheduler = IndexingScheduler(config, github_client, intel_db)
+            resources.append(("indexing_scheduler", indexing_scheduler))
+
         logger.info("Phase 4 complete — pipeline, GitHub client, scheduler, and treasury ready")
     except Exception:
         logger.exception("Phase 4 failed")
@@ -475,6 +493,7 @@ async def bootstrap() -> None:  # noqa: C901
     scheduler_task: asyncio.Task[None] | None = None
     dispute_scheduler_task: asyncio.Task[None] | None = None
     patrol_scheduler_task: asyncio.Task[None] | None = None
+    indexing_scheduler_task: asyncio.Task[None] | None = None
     server_task: asyncio.Task[None] | None = None
     try:
         logger.info("Phase 5: Start Services")
@@ -502,6 +521,9 @@ async def bootstrap() -> None:  # noqa: C901
 
         if patrol_scheduler is not None:
             patrol_scheduler_task = asyncio.create_task(patrol_scheduler.run())
+
+        if indexing_scheduler is not None:
+            indexing_scheduler_task = asyncio.create_task(indexing_scheduler.run())
 
         # Build identity env for the TS proxy subprocess
         identity_env: dict[str, str] = {
@@ -545,7 +567,10 @@ async def bootstrap() -> None:  # noqa: C901
 
     except Exception:
         logger.exception("Phase 5 failed")
-        for task in (scheduler_task, dispute_scheduler_task, patrol_scheduler_task, server_task):
+        for task in (
+            scheduler_task, dispute_scheduler_task,
+            patrol_scheduler_task, indexing_scheduler_task, server_task,
+        ):
             if task is not None:
                 task.cancel()
         await _teardown(resources)
@@ -565,6 +590,8 @@ async def bootstrap() -> None:  # noqa: C901
         ts_proxy=ts_proxy,
         patrol_scheduler=patrol_scheduler,
         patrol_scheduler_task=patrol_scheduler_task,
+        indexing_scheduler=indexing_scheduler,
+        indexing_scheduler_task=indexing_scheduler_task,
     )
 
 

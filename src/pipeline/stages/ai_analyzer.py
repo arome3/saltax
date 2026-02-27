@@ -257,6 +257,7 @@ async def run_ai_analysis(
             vision_document=(
                 state.vision_document if vision_enabled else None
             ),
+            custom_rules_text=state.custom_rules_text,
         )
 
         # 3b. Prompt injection detection (Fix 3)
@@ -302,6 +303,7 @@ async def run_ai_analysis(
                 vision_document=(
                     state.vision_document if vision_enabled else None
                 ),
+                custom_rules_text=state.custom_rules_text,
                 max_diff_chars=_MAX_DIFF_CHARS // 2,
             )
             if markers:

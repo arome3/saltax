@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from src.feedback.confidence import confidence_badge_compact
+
 if TYPE_CHECKING:
     from src.models.pipeline import Finding, Verdict
 
@@ -36,18 +38,20 @@ def format_pipeline_result(verdict: Verdict, findings: list[Finding]) -> str:
         lines.append(f"| {component} | {score:.2f} |")
 
     if findings:
-        displayed = findings[:_MAX_FINDINGS_DISPLAYED]
+        sorted_findings = sorted(findings, key=lambda f: f.confidence, reverse=True)
+        displayed = sorted_findings[:_MAX_FINDINGS_DISPLAYED]
         lines.extend([
             "",
             f"### Findings ({len(findings)} total)",
             "",
-            "| Severity | Category | File | Message |",
-            "|----------|----------|------|---------|",
+            "| Severity | Category | File | Message | Confidence |",
+            "|----------|----------|------|---------|------------|",
         ])
         for f in displayed:
             lines.append(
                 f"| {f.severity.value} | {f.category.value} | "
-                f"`{escape_cell(f.file_path)}:{f.line_start}` | {escape_cell(f.message)} |"
+                f"`{escape_cell(f.file_path)}:{f.line_start}` | {escape_cell(f.message)} "
+                f"| {confidence_badge_compact(f.confidence)} |"
             )
         if len(findings) > _MAX_FINDINGS_DISPLAYED:
             lines.append(

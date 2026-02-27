@@ -63,6 +63,7 @@ class PipelineConfig(BaseModel):
     test_executor_timeout: int = Field(default=300, gt=0)
     test_executor_memory_mb: int = Field(default=2048, gt=0)
     history_weight: float = Field(default=0.0, ge=0.0, le=0.30)
+    min_display_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -360,6 +361,32 @@ class FeedbackConfig(BaseModel):
     enabled: bool = True
 
 
+class RulesConfig(BaseModel):
+    """Custom review rules loaded from ``.saltax/rules.md``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    rules_file_path: str = ".saltax/rules.md"
+    max_rules_per_repo: int = Field(default=50, ge=1, le=200)
+    max_rule_description_chars: int = Field(default=500, ge=50, le=2000)
+    cache_ttl_seconds: int = Field(default=3600, gt=0)
+    max_prompt_chars: int = Field(default=6000, ge=500, le=20000)
+
+
+class IndexingConfig(BaseModel):
+    """Codebase graph indexing configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    interval_seconds: int = Field(default=86400, gt=0)
+    max_files_per_repo: int = Field(default=5000, gt=0)
+    languages: list[str] = Field(
+        default_factory=lambda: ["python", "javascript", "typescript"]
+    )
+
+
 class AgentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -390,7 +417,9 @@ class SaltaXConfig(BaseModel):
     triage: TriageConfig = Field(default_factory=TriageConfig)
     backfill: BackfillConfig = Field(default_factory=BackfillConfig)
     patrol: PatrolConfig = Field(default_factory=PatrolConfig)
+    indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
+    rules: RulesConfig = Field(default_factory=RulesConfig)
 
     @model_validator(mode="before")
     @classmethod

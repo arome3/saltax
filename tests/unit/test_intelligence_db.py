@@ -143,7 +143,7 @@ class TestSchemaCreation:
             )
             row = await cursor.fetchone()
         assert row is not None
-        assert row["version"] == 16
+        assert row["version"] == 17
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1564,7 +1564,7 @@ class TestIssueEmbeddings:
             )
             row = await cursor.fetchone()
         assert row is not None
-        assert row["version"] == 16
+        assert row["version"] == 17
 
 
 # ── V. Patrol CRUD ───────────────────────────────────────────────────────────
