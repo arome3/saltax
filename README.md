@@ -6,29 +6,6 @@ A self-sustaining, ownerless AI agent that autonomously maintains open-source re
 
 ---
 
-**Author:** Arome Onoja / NatQuest Limited
-**License:** MIT
-**Platform:** [EigenCloud](https://eigencloud.xyz) (EigenCompute + EigenAI)
-
-**Scale:** 23-table intelligence database (schema v17) | Solidity contracts on Base | 14-page real-time dashboard | 4-stage review pipeline
-
----
-
-## The 3-Minute Demo
-
-A contributor opens a pull request against a SaltaX-managed repository. Here is what happens next — with no human involvement:
-
-1. **0s** — GitHub fires a webhook. SaltaX verifies the HMAC-SHA256 signature, deduplicates against previous deliveries, and checks for prompt injection in the PR body.
-2. **~2s** — The triage layer embeds the PR diff, runs cosine similarity against all open PRs (threshold 0.85), links it to the target issue, and scores it against the project's `vision.yaml`.
-3. **~10s** — Stage 1: Semgrep scans the diff for OWASP, supply-chain, and secret-leak patterns. Custom rules from `.saltax/rules.md` apply path-scoped include/exclude filters. Findings are post-filtered to changed files only. A CRITICAL finding short-circuits the pipeline immediately.
-4. **~30s** — Stage 2: EigenAI analyzes code quality (1–10) and security risk (1–10). Custom review rules are injected with per-file applicability (the AI sees exactly which files each rule governs). The inference call is **seed-pinned** (`int(commit_sha[:8], 16) % 2**32`) and authenticated via a wallet grant signature — no API key exists.
-5. **~5m** — Stage 3: Tests run in a sandboxed executor with a 512 MB memory cap. Exit code, coverage delta, and stdout/stderr are captured.
-6. **~5m 01s** — Stage 4: The decision engine computes a weighted score (0.25 × static + 0.25 × AI quality + 0.25 × AI security + 0.25 × tests). Score ≥ 0.75 → APPROVE. Score ≥ 0.50 → REQUEST_CHANGES. Below 0.50 → REJECT.
-7. **~5m 02s** — A **signed attestation proof** binds the Docker image digest, TEE platform ID, input hash, output hash, AI seed, and system fingerprint into a single EIP-191 signature. The proof chains to the previous attestation via `previous_attestation_id`.
-8. **+24h** — The optimistic verification window closes. No challenge was filed. SaltaX auto-merges the PR and pays the bounty from its autonomous treasury — one on-chain transaction, no human approval.
-
-The contributor earned ETH. SaltaX learned a new vulnerability pattern. The intelligence database grew. The cycle continues.
-
 ## What Is SaltaX?
 
 SaltaX is a **sovereign AI agent** — an ownerless, self-sustaining digital entity that autonomously maintains open-source software repositories. It is not a tool operated by a human. It is an independent organism that:
