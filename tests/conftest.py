@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import textwrap
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -17,6 +18,34 @@ _TEST_DATABASE_URL = os.environ.get(
     "SALTAX_TEST_DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/saltax_test",
 )
+
+# ---------------------------------------------------------------------------
+# DB availability check — skip DB tests when no PostgreSQL is reachable
+# ---------------------------------------------------------------------------
+_DB_FIXTURE_NAMES = frozenset({"mock_intel_db", "intel_db"})
+
+
+def _is_db_reachable() -> bool:
+    """Quick TCP probe to the test database port."""
+    try:
+        s = socket.create_connection(("localhost", 5432), timeout=2)
+        s.close()
+        return True
+    except (OSError, ConnectionRefusedError, TimeoutError):
+        return False
+
+
+_DB_AVAILABLE = _is_db_reachable()
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Mark DB-dependent tests for skipping when no database is available."""
+    if _DB_AVAILABLE:
+        return
+    skip_marker = pytest.mark.skip(reason="Database not reachable at localhost:5432")
+    for item in items:
+        if _DB_FIXTURE_NAMES & set(getattr(item, "fixturenames", ())):
+            item.add_marker(skip_marker)
 
 # ---------------------------------------------------------------------------
 # Valid YAML content matching the production saltax.config.yaml structure

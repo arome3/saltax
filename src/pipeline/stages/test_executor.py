@@ -54,11 +54,12 @@ _LANGUAGES: tuple[_LangConfig, ...] = (
     _LangConfig(
         name="python",
         detect_files=("pyproject.toml", "setup.py", "setup.cfg"),
-        install_cmd=["pip", "install", "-e", ".[test]", "--quiet"],
-        install_fallback=["pip", "install", "-e", ".", "--quiet"],
+        install_cmd=["pip", "install", "-e", ".[test]", "pytest-timeout", "--quiet"],
+        install_fallback=["pip", "install", "-e", ".", "pytest-timeout", "--quiet"],
         test_cmd=[
             "python", "-m", "pytest", "--tb=short", "-q",
             "--ignore=tests/integration", "--ignore=tests/e2e",
+            "--timeout=5",
         ],
     ),
     _LangConfig(
@@ -103,6 +104,7 @@ async def run_tests(state: PipelineState, config: SaltaXConfig) -> None:
             _clone_repo(state.repo_url, state.head_branch, repo_dir),
             timeout=_CLONE_TIMEOUT,
         )
+        logger.info("Clone completed in %.1fs", time.monotonic() - t0)
 
         lang = _detect_language(repo_dir)
         if lang is None:
@@ -114,9 +116,13 @@ async def run_tests(state: PipelineState, config: SaltaXConfig) -> None:
             return
 
         mem_mb = config.pipeline.test_executor_memory_mb
+        t_install = time.monotonic()
         await _install_deps(lang, repo_dir, tmp_dir, memory_mb=mem_mb)
+        logger.info("Install completed in %.1fs", time.monotonic() - t_install)
 
+        t_test = time.monotonic()
         result = await _run_test_suite(lang, repo_dir, tmp_dir, config)
+        logger.info("Test suite completed in %.1fs", time.monotonic() - t_test)
         state.test_results = result.model_dump()
 
         elapsed = time.monotonic() - t0
@@ -371,12 +377,18 @@ def _smart_truncate(text: str, max_len: int) -> str:
 
 
 def _subprocess_env(tmp_dir: str) -> dict[str, str]:
-    """Build a minimal, isolated environment for subprocess execution."""
+    """Build a minimal, isolated environment for subprocess execution.
+
+    ``PGCONNECT_TIMEOUT`` makes libpq fail fast when no PostgreSQL server is
+    reachable, preventing test suites from hanging on ``AsyncConnectionPool``
+    open attempts in the sandbox.
+    """
     return {
         "HOME": tmp_dir,
         "CI": "true",
         "NODE_ENV": "test",
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "PGCONNECT_TIMEOUT": "3",
     }
 
 
