@@ -59,7 +59,7 @@ _LANGUAGES: tuple[_LangConfig, ...] = (
         test_cmd=[
             "python", "-m", "pytest", "--tb=short", "-q",
             "--ignore=tests/integration", "--ignore=tests/e2e",
-            "--timeout=5",
+            "--timeout=30",
         ],
     ),
     _LangConfig(

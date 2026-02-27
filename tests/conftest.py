@@ -83,10 +83,10 @@ VALID_YAML = textwrap.dedent("""\
           memory_limit_mb: 2048
         decision_engine:
           weights:
-            static_clear: 0.25
-            ai_quality: 0.25
-            ai_security: 0.25
-            tests_pass: 0.25
+            static_clear: 0.35
+            ai_quality: 0.05
+            ai_security: 0.05
+            tests_pass: 0.55
 
     treasury:
       reserve_ratio: 0.20

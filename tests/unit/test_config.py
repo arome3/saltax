@@ -87,7 +87,7 @@ class TestPipelineValidation:
         assert p.ai_analyzer_model == "gpt-oss-120b-f16"
         assert p.test_executor_timeout == 300
         assert p.test_executor_memory_mb == 2048
-        assert p.weights.static_clear == 0.25
+        assert p.weights.static_clear == 0.35
 
     def test_pipeline_from_flat_dict(self) -> None:
         """PipelineConfig also works with pre-flattened data (no stages key)."""

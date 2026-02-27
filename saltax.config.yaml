@@ -26,14 +26,14 @@ pipeline:
       semaphore_timeout_seconds: 30
     test_executor:
       enabled: true
-      timeout_seconds: 120
+      timeout_seconds: 300
       memory_limit_mb: 2048
     decision_engine:
       weights:
-        static_clear: 0.25
-        ai_quality: 0.25
-        ai_security: 0.25
-        tests_pass: 0.25
+        static_clear: 0.35
+        ai_quality: 0.05
+        ai_security: 0.05
+        tests_pass: 0.55
 
 treasury:
   reserve_ratio: 0.20
@@ -112,3 +112,12 @@ patrol:
       MEDIUM: "bounty-md"
       LOW: "bounty-sm"
     max_open_bounties_per_repo: 10
+
+indexing:
+  enabled: true
+  interval_seconds: 86400
+  max_files_per_repo: 5000
+  languages:
+    - python
+    - javascript
+    - typescript
