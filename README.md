@@ -395,9 +395,11 @@ Built with shadcn/ui, Tailwind CSS, and wagmi for wallet integration. Dark theme
 | **Autonomous Patrol** | Scheduled dependency vulnerability scanning (OSV.dev), codebase re-audits (Semgrep), bounty issuance for discovered vulnerabilities |
 | **Custom Review Rules** | Repository owners define rules in `.saltax/rules.md` with severity, scope patterns, and descriptions — injected into AI analysis with per-file applicability |
 | **Path-Scoped Rules** | Include/exclude glob patterns (`!tests/**`) with `PurePosixPath.full_match()`, Semgrep `--include`/`--exclude` flags, and post-scan filtering to changed files only |
-| **PR Summary Comments** | Visual verdict summaries posted to PRs with score breakdowns, finding counts, attestation links, and codebase knowledge context |
-| **Confidence Calibration** | Feedback-driven confidence scoring — GitHub emoji reactions (thumbs up/down) feed back into pattern accuracy, auto-suppressing rules that exceed 80% false-positive rate |
+| **PR Summary Comments** | Visual verdict summaries with mermaid score waterfall charts, module dependency diagrams, file risk heatmaps, and attestation links — posted as a single comment that updates in-place on re-runs |
+| **Confidence Calibration** | Feedback-driven confidence scoring — GitHub emoji reactions (thumbs up/down) feed back into pattern accuracy, auto-suppressing rules that exceed 80% false-positive rate. Anti-gaming: 24h reaction window, 5-reaction/user/PR cap, `UNIQUE(pr_id, rule_id, github_user)` dedup |
 | **Codebase Graph Indexing** | Multi-language dependency graph (Python, JS/TS, Go, Rust) with PageRank centrality scoring, stored in the intelligence DB for context-aware risk analysis |
+| **Backfill Engine** | Resumable batch processing of existing PRs/issues with rate-limit-aware pagination — bootstrap intelligence from historical data without re-triggering webhooks |
+| **Vector Similarity Index** | In-process HNSW index for sub-linear cosine similarity search across PR and issue embeddings, with auto-enable heuristic (activates when embedding count exceeds linear-scan threshold) |
 | **Advisory Mode** | Human-in-the-loop mode: recommends actions via comments/labels without auto-merging |
 | **On-Chain Treasury** | Solidity contracts enforce fiscal policy (reserve ratio, bounty cap, max payout) mirroring Python policy engine — defense in depth |
 
