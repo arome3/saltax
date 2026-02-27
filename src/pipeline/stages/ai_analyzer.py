@@ -25,6 +25,7 @@ from openai import (
     APIConnectionError,
     APITimeoutError,
     AsyncOpenAI,
+    BadRequestError,
     InternalServerError,
     RateLimitError,
 )
@@ -84,7 +85,7 @@ _RE_JSON_FENCE = re.compile(
 )
 
 # Determinal model channel/message control tokens
-_RE_CHANNEL_TOKENS = re.compile(r"^<\|channel\|>[^<]*<\|message\|>")
+_RE_CHANNEL_TOKENS = re.compile(r"<\|channel\|>.*?<\|end\|>", re.DOTALL)
 
 # Natural language score patterns
 _RE_QUALITY_NL = re.compile(
@@ -513,9 +514,31 @@ async def _call_with_retry(
                     response_format={"type": "json_object"},
                     temperature=0.0,
                     seed=seed,
-                    max_tokens=4096,
+                    max_tokens=800,
                     extra_body=grant_body,
                 )
+            except BadRequestError as exc:
+                # Grant token exhaustion: retry once with minimal max_tokens
+                err_msg = str(exc)
+                if "Insufficient grant tokens" in err_msg and attempt == 0:
+                    if retry_tracker is not None:
+                        retry_tracker.append(attempt)
+                    logger.warning(
+                        "Grant tokens insufficient — retrying with max_tokens=400",
+                    )
+                    return await client.chat.completions.create(
+                        model=model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        response_format={"type": "json_object"},
+                        temperature=0.0,
+                        seed=seed,
+                        max_tokens=400,
+                        extra_body=grant_body,
+                    )
+                raise
             except _RETRYABLE_ERRORS as exc:
                 if attempt == _MAX_RETRIES:
                     raise

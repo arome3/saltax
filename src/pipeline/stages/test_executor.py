@@ -139,6 +139,14 @@ async def run_tests(state: PipelineState, config: SaltaXConfig) -> None:
         state.test_results = _failed_test_result(
             "Timed out", elapsed, timed_out=True,
         ).model_dump()
+    except FileNotFoundError as exc:
+        # Tool not found (e.g. pnpm, yarn) means tests *couldn't run*,
+        # not that they *failed*.  Leave test_results as None so the
+        # decision engine treats this as degraded-neutral (0.5) rather
+        # than a hard failure (0.0).
+        logger.warning(
+            "Test runner tool not found — treating as unavailable: %s", exc,
+        )
     except Exception:
         elapsed = time.monotonic() - t0
         logger.exception("Test executor failed unexpectedly")
