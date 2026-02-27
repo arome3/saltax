@@ -60,7 +60,7 @@ VALID_YAML = textwrap.dedent("""\
     database:
       pool_min_size: 2
       pool_max_size: 10
-      pool_timeout: 30.0
+      pool_timeout: 3.0
       statement_timeout_ms: 30000
 
     pipeline:
