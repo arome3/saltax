@@ -61,8 +61,9 @@ class PipelineConfig(BaseModel):
     ai_analyzer_timeout: int = Field(default=60, gt=0)
     ai_analyzer_semaphore_timeout: int = Field(default=30, gt=0)
     test_executor_timeout: int = Field(default=300, gt=0)
-    test_executor_memory_mb: int = Field(default=512, gt=0)
+    test_executor_memory_mb: int = Field(default=2048, gt=0)
     history_weight: float = Field(default=0.0, ge=0.0, le=0.30)
+    min_display_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
 
     @model_validator(mode="before")
     @classmethod
