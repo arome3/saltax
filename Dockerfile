@@ -71,4 +71,4 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
 
 EXPOSE 8080
 
-ENTRYPOINT ["python", "-m", "src.main"]
+CMD ["python", "-m", "src.main"]
